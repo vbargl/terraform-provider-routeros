@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -37,6 +38,9 @@ var objects = []definition{
 	{name: "dhcp_lease", menu: "/ip/dhcp-server/lease", required: []string{"address", "mac-address", "server"}, optional: []string{"comment", "disabled=no"}},
 	{name: "nat_rule", menu: "/ip/firewall/nat", required: []string{"chain", "action", "src-address", "dst-address", "to-addresses"}, optional: []string{"in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "firewall_rule", menu: "/ip/firewall/filter", required: []string{"chain", "action", "src-address", "dst-address"}, optional: []string{"protocol", "dst-port", "in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
+	{name: "interface_veth", menu: "/interface/veth", required: []string{"name", "address"}, optional: []string{"gateway", "comment", "disabled=no"}},
+	{name: "container_env", menu: "/container/envs", required: []string{"list", "key", "value"}, optional: []string{"comment", "disabled=no"}},
+	{name: "container_mount", menu: "/container/mounts", required: []string{"list", "src", "dst", "mode"}, optional: []string{"comment", "disabled=no"}},
 }
 
 type managedObject struct {
@@ -45,7 +49,10 @@ type managedObject struct {
 	menuLock *sync.Mutex
 }
 
-var objectID = regexp.MustCompile(`^\*[0-9A-Fa-f]+$`)
+var (
+	objectID = regexp.MustCompile(`^\*[0-9A-Fa-f]+$`)
+	envKey   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
 
 func attr(field string) path.Path { return path.Root(strings.ReplaceAll(field, "-", "_")) }
 
@@ -411,6 +418,35 @@ func (r *managedObject) validateValues(values map[string]string, unknown map[str
 	}
 	if value, known := values["disabled"]; known && value != "" && value != "yes" && value != "no" {
 		diagnostics.AddAttributeError(attr("disabled"), "Invalid disabled value", "Use yes or no.")
+	}
+	switch r.name {
+	case "container_mount":
+		if mode, known := values["mode"]; known && !slices.Contains([]string{"ro", "ro,noexec", "rw", "rw,noexec"}, mode) {
+			diagnostics.AddAttributeError(attr("mode"), "Invalid mount mode", "Use ro, ro,noexec, rw or rw,noexec.")
+		}
+		for _, field := range []string{"src", "dst"} {
+			if value, known := values[field]; known && value != "" && !strings.HasPrefix(value, "/") {
+				diagnostics.AddAttributeError(attr(field), "Invalid mount path", "Use an absolute path.")
+			}
+		}
+	case "container_env":
+		if key, known := values["key"]; known && key != "" && !envKey.MatchString(key) {
+			diagnostics.AddAttributeError(attr("key"), "Invalid environment variable name", "Use letters, digits and underscores, not starting with a digit.")
+		}
+	case "interface_veth":
+		if address, known := values["address"]; known && address != "" {
+			for _, entry := range strings.Split(address, ",") {
+				if _, err := netip.ParsePrefix(strings.TrimSpace(entry)); err != nil {
+					diagnostics.AddAttributeError(attr("address"), "Invalid veth address", "Use one or more comma-separated prefixes, for example 192.168.88.20/24.")
+					break
+				}
+			}
+		}
+		if gateway, known := values["gateway"]; known && gateway != "" {
+			if addr, err := netip.ParseAddr(gateway); err != nil || !addr.Is4() {
+				diagnostics.AddAttributeError(attr("gateway"), "Invalid veth gateway", "Use an IPv4 address.")
+			}
+		}
 	}
 	if !r.ordered {
 		return

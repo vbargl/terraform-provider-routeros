@@ -64,3 +64,25 @@ run "container_mode_disabled" {
 
   expect_failures = [terraform_data.container_host]
 }
+
+run "container_workload" {
+  command = plan
+
+  module {
+    source = "./tests/fixtures/container"
+  }
+
+  variables {
+    registry_token = "not-a-real-token"
+  }
+
+  assert {
+    condition     = routeros_container.agent.interface == "veth-agent" && routeros_container.agent.envlists == "agent" && routeros_container.agent.mountlists == "agent"
+    error_message = "The container must reference its veth, environment and mount lists."
+  }
+
+  assert {
+    condition     = routeros_container_config.this.password_wo == null
+    error_message = "The registry password is write-only and must not appear in the plan."
+  }
+}
