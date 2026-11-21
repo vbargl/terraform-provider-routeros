@@ -129,17 +129,11 @@ func TestContainerConfigRequiresPasswordVersion(t *testing.T) {
 	}
 }
 
-func TestContainerObjectValidation(t *testing.T) {
+func TestVethValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, field, value string
 		valid              bool
 	}{
-		{"container_mount", "mode", "ro", true},
-		{"container_mount", "mode", "readonly", false},
-		{"container_mount", "dst", "/etc/knockerup", true},
-		{"container_mount", "src", "kubeconfig", false},
-		{"container_env", "key", "POD_NAMESPACE", true},
-		{"container_env", "key", "1BAD", false},
 		{"interface_veth", "address", "192.168.88.20/24", true},
 		{"interface_veth", "address", "192.168.88.20", false},
 		{"interface_veth", "gateway", "192.168.88.1", true},

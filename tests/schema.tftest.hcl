@@ -82,8 +82,8 @@ run "container_workload" {
   }
 
   assert {
-    condition     = length(routeros_container_env.agent) == 3 && length(routeros_container_mount.agent) == 2 && alltrue([for key, env in routeros_container_env.agent : env.list == "agent" && env.key == key])
-    error_message = "One list holds several entries with distinct keys."
+    condition     = length(routeros_container_env_list.agent.env) == 3 && length(routeros_container_mount_list.agent.mount) == 2 && routeros_container_mount_list.agent.mount["/etc/agent"].mode == "ro"
+    error_message = "One list resource holds several entries."
   }
 
   assert {
@@ -115,7 +115,7 @@ run "container_list_entries_change" {
   }
 
   assert {
-    condition     = join(",", sort(keys(routeros_container_env.agent))) == "IDENTITY,OTLP_ENDPOINT,POD_NAMESPACE" && length(routeros_container_mount.agent) == 2
-    error_message = "Other entries must stay in place."
+    condition     = join(",", sort(keys(routeros_container_env_list.agent.env))) == "IDENTITY,OTLP_ENDPOINT,POD_NAMESPACE" && length(routeros_container_mount_list.agent.mount) == 2
+    error_message = "The list must hold the new set of entries; the mount list stays unchanged."
   }
 }

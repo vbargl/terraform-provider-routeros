@@ -43,25 +43,19 @@ variable "mounts" {
   }
 }
 
-resource "routeros_container_env" "common" {
-  list  = "common"
-  key   = "TZ"
-  value = "Europe/Prague"
+resource "routeros_container_env_list" "common" {
+  name = "common"
+  env  = { TZ = "Europe/Prague" }
 }
 
-resource "routeros_container_env" "agent" {
-  for_each = var.envs
-  list     = "agent"
-  key      = each.key
-  value    = each.value
+resource "routeros_container_env_list" "agent" {
+  name = "agent"
+  env  = var.envs
 }
 
-resource "routeros_container_mount" "agent" {
-  for_each = var.mounts
-  list     = "agent"
-  src      = each.value
-  dst      = each.key
-  mode     = "ro"
+resource "routeros_container_mount_list" "agent" {
+  name  = "agent"
+  mount = { for dst, src in var.mounts : dst => { src = src, mode = "ro" } }
 }
 
 resource "routeros_container" "agent" {
@@ -69,11 +63,10 @@ resource "routeros_container" "agent" {
   remote_image  = "example/agent:1.0.0"
   interface     = routeros_interface_veth.agent.name
   root_dir      = "usb1/agent"
-  envlists      = [routeros_container_env.common.list, "agent"]
-  mountlists    = ["agent"]
+  envlists      = [routeros_container_env_list.common.name, routeros_container_env_list.agent.name]
+  mountlists    = [routeros_container_mount_list.agent.name]
   start_on_boot = "yes"
-  # Entries are referenced by list name; the container does not depend on each entry.
-  depends_on = [routeros_container_config.this, routeros_container_env.agent, routeros_container_mount.agent]
+  depends_on    = [routeros_container_config.this]
 }
 
 output "container_id" {

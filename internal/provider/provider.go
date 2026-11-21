@@ -90,6 +90,8 @@ func (*routerProvider) Resources(context.Context) []func() resource.Resource {
 	return append(result,
 		func() resource.Resource { return &container{} },
 		func() resource.Resource { return &containerConfig{} },
+		func() resource.Resource { return &containerList{listSpec: envListSpec} },
+		func() resource.Resource { return &containerList{listSpec: mountListSpec} },
 	)
 }
 func (*routerProvider) DataSources(context.Context) []func() datasource.DataSource {

@@ -90,8 +90,8 @@ func (*container) Schema(_ context.Context, _ resource.SchemaRequest, resp *reso
 		attributes[attr(field).String()] = attribute
 	}
 	for field, description := range map[string]string{
-		"envlists":   "Names of routeros_container_env lists. Order is kept; a reordered list read from the router is not drift.",
-		"mountlists": "Names of routeros_container_mount lists. Order is kept; a reordered list read from the router is not drift.",
+		"envlists":   "Names of routeros_container_env_list resources. Order is kept; a reordered list read from the router is not drift.",
+		"mountlists": "Names of routeros_container_mount_list resources. Order is kept; a reordered list read from the router is not drift.",
 	} {
 		attributes[attr(field).String()] = schema.ListAttribute{
 			ElementType: types.StringType, Optional: true, Computed: true, Description: description + " Omit to leave the router's value unmanaged.",

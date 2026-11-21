@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 
@@ -39,8 +38,6 @@ var objects = []definition{
 	{name: "nat_rule", menu: "/ip/firewall/nat", required: []string{"chain", "action", "src-address", "dst-address", "to-addresses"}, optional: []string{"in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "firewall_rule", menu: "/ip/firewall/filter", required: []string{"chain", "action", "src-address", "dst-address"}, optional: []string{"protocol", "dst-port", "in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "interface_veth", menu: "/interface/veth", required: []string{"name", "address"}, optional: []string{"gateway", "comment", "disabled=no"}},
-	{name: "container_env", menu: "/container/envs", required: []string{"list", "key", "value"}, optional: []string{"comment", "disabled=no"}},
-	{name: "container_mount", menu: "/container/mounts", required: []string{"list", "src", "dst", "mode"}, optional: []string{"comment", "disabled=no"}},
 }
 
 type managedObject struct {
@@ -268,9 +265,6 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 		}
 	}
 
-	if !diagnostics.HasError() {
-		r.rejectDuplicateListEntry(ctx, id, values, diagnostics)
-	}
 	if command == "add" && !anchor.IsNull() && anchor.ValueString() != "" {
 		words = append(words, "=place-before="+strings.ToUpper(anchor.ValueString()))
 	}
@@ -423,25 +417,6 @@ func (r *managedObject) validateValues(values map[string]string, unknown map[str
 		diagnostics.AddAttributeError(attr("disabled"), "Invalid disabled value", "Use yes or no.")
 	}
 	switch r.name {
-	case "container_mount":
-		if list, known := values["list"]; known && list != "" && !listName.MatchString(list) {
-			diagnostics.AddAttributeError(attr("list"), "Invalid list name", "Use a list name without commas or spaces; containers reference several lists as a comma-separated value.")
-		}
-		if mode, known := values["mode"]; known && !slices.Contains([]string{"ro", "ro,noexec", "rw", "rw,noexec"}, mode) {
-			diagnostics.AddAttributeError(attr("mode"), "Invalid mount mode", "Use ro, ro,noexec, rw or rw,noexec.")
-		}
-		for _, field := range []string{"src", "dst"} {
-			if value, known := values[field]; known && value != "" && !strings.HasPrefix(value, "/") {
-				diagnostics.AddAttributeError(attr(field), "Invalid mount path", "Use an absolute path.")
-			}
-		}
-	case "container_env":
-		if list, known := values["list"]; known && list != "" && !listName.MatchString(list) {
-			diagnostics.AddAttributeError(attr("list"), "Invalid list name", "Use a list name without commas or spaces; containers reference several lists as a comma-separated value.")
-		}
-		if key, known := values["key"]; known && key != "" && !envKey.MatchString(key) {
-			diagnostics.AddAttributeError(attr("key"), "Invalid environment variable name", "Use letters, digits and underscores, not starting with a digit.")
-		}
 	case "interface_veth":
 		if address, known := values["address"]; known && address != "" {
 			for _, entry := range strings.Split(address, ",") {
@@ -502,31 +477,6 @@ func (r *managedObject) validateValues(values map[string]string, unknown map[str
 		}
 		if port := values["dst-port"]; port != "" && !unknown["protocol"] && values["protocol"] != "tcp" && values["protocol"] != "udp" {
 			diagnostics.AddAttributeError(attr("protocol"), "Invalid filter protocol", "Use tcp or udp when matching a destination port.")
-		}
-	}
-}
-
-// listUniqueField is the field that must be unique within one container env or mount list.
-var listUniqueField = map[string]string{"container_env": "key", "container_mount": "dst"}
-
-// rejectDuplicateListEntry refuses a second entry with the same key (env) or
-// destination (mount) in one list. The container would otherwise get an
-// ambiguous environment or overlapping mounts depending on RouterOS ordering.
-func (r *managedObject) rejectDuplicateListEntry(ctx context.Context, id string, values map[string]string, diagnostics *diag.Diagnostics) {
-	field, ok := listUniqueField[r.name]
-	if !ok {
-		return
-	}
-	rows, _, err := r.client.run(ctx, r.menu+"/print", "=.proplist=.id,list,"+field, "?list="+values["list"])
-	if err != nil {
-		diagnostics.AddError("Check container list", err.Error())
-		return
-	}
-	for _, row := range rows {
-		if row["list"] == values["list"] && row[field] == values[field] && !strings.EqualFold(row[".id"], id) {
-			diagnostics.AddAttributeError(attr(field), "Duplicate container list entry",
-				fmt.Sprintf("List %q already has an entry with %s %q (RouterOS object %s). Use one entry per %s in a list.", values["list"], field, values[field], row[".id"], field))
-			return
 		}
 	}
 }

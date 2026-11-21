@@ -11,8 +11,8 @@ resource "routeros_container" "agent" {
   remote_image  = "owner/agent:1.0.0"
   interface     = routeros_interface_veth.agent.name
   root_dir      = "usb1/containers/agent"
-  envlists      = ["common", "agent"]
-  mountlists    = ["agent"]
+  envlists      = [routeros_container_env_list.agent.name]
+  mountlists    = [routeros_container_mount_list.agent.name]
   logging       = "yes"
   start_on_boot = "yes"
 }
@@ -20,15 +20,25 @@ resource "routeros_container" "agent" {
 
 The router needs container mode in `/system/device-mode` and the `container` package enabled. Check both with the `routeros_device_mode` and `routeros_package` data sources in a precondition.
 
-Required: `name`, `interface` and `root_dir`, plus exactly one of `remote_image` (pulled from the registry in `routeros_container_config`) and `file` (an image tar already on the router). `envlists` and `mountlists` are lists of `routeros_container_env` and `routeros_container_mount` list names. RouterOS 7.25 accepts several names and stores them comma-separated. Names must be distinct and contain no commas or spaces. The provider keeps your order, and a reordered value read back from the router is not drift. The optional strings are `cmd`, `entrypoint`, `hostname`, `user`, `workdir` and `dns`. Omit one to leave the router's value unmanaged. `logging`, `check_certificate` and `start_on_boot` take `yes` or `no` (defaults `no`, `yes`, `no`). `restart_policy` is `no`, `on-failure` or `always` (default `no`).
+Required: `name`, `interface` and `root_dir`, plus exactly one of `remote_image` (pulled from the registry in `routeros_container_config`) and `file` (an image tar already on the router). `envlists` and `mountlists` are lists of `routeros_container_env_list` and `routeros_container_mount_list` names. RouterOS 7.25 accepts several names and stores them comma-separated. Names must be distinct and contain no commas or spaces. The provider keeps your order, and a reordered value read back from the router is not drift. The optional strings are `cmd`, `entrypoint`, `hostname`, `user`, `workdir` and `dns`. Omit one to leave the router's value unmanaged. `logging`, `check_certificate` and `start_on_boot` take `yes` or `no` (defaults `no`, `yes`, `no`). `restart_policy` is `no`, `on-failure` or `always` (default `no`).
 
 Changing any setting except `comment`, `start_on_boot` and `running` replaces the container. RouterOS rejects most changes to a running container, and the intended workloads keep no state in the container.
 
 ## Env and mount lists
 
-RouterOS stores each environment variable and each mount as its own entry, grouped by list name. A container references whole lists, not entries. Adding, changing or removing an entry therefore does not change or replace the container in Terraform. RouterOS applies the lists when the container starts, so restart or replace the container to pick up changed entries, for example with `lifecycle { replace_triggered_by = [routeros_container_env.agent] }`. This start-time behaviour has not been qualified on CHR yet.
+A container references whole lists by name. Changing the entries of a `routeros_container_env_list` or `routeros_container_mount_list` neither updates nor replaces the container.
 
-If the same key appears in several lists referenced by one container, which value wins is decided by RouterOS. Keep keys unique across a container's lists.
+RouterOS applies env and mount lists when the container starts, so a running container keeps its old environment and mounts until it restarts. The provider does not restart containers on list changes, because a restart interrupts the workload and should be a deliberate step. To apply a change, run `/container/restart` on the router, or let Terraform replace the container on every list change:
+
+```hcl
+lifecycle {
+  replace_triggered_by = [routeros_container_env_list.agent, routeros_container_mount_list.agent]
+}
+```
+
+Replacement removes the container and extracts the image again. That takes longer than a restart, especially on routers with slow storage. The start-time behaviour has not been qualified on CHR yet.
+
+If the same key appears in several lists referenced by one container, RouterOS decides which value wins. Keep keys unique across a container's lists.
 
 ## Lifecycle
 
@@ -43,4 +53,4 @@ Extraction needs room for the download in `tmpdir` and the extracted image in `r
 
 ## Secrets
 
-Do not pass secrets through `routeros_container_env`: values are stored in state. Upload secret files to the router outside Terraform and mount them read-only with `routeros_container_mount`.
+Do not pass secrets through `routeros_container_env_list`: values are stored in state and readable on the router. Upload secret files to the router outside Terraform and mount them read-only with `routeros_container_mount_list`.
