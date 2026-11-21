@@ -40,8 +40,15 @@ func (r *managedObject) normalize(field, value string) string {
 		}
 		return normalizePrefix(value)
 	case "address":
-		if r.name == "dhcp_network" {
+		switch r.name {
+		case "dhcp_network":
 			return normalizePrefix(value)
+		case "interface_veth":
+			addresses := strings.Split(value, ",")
+			for index, address := range addresses {
+				addresses[index] = strings.TrimSpace(address)
+			}
+			return strings.Join(addresses, ",")
 		}
 	case "allowed-address":
 		addresses := strings.Split(value, ",")

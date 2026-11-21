@@ -87,7 +87,12 @@ func (*routerProvider) Resources(context.Context) []func() resource.Resource {
 	for _, object := range objects {
 		result = append(result, func() resource.Resource { return &managedObject{definition: object} })
 	}
-	return result
+	return append(result,
+		func() resource.Resource { return &container{} },
+		func() resource.Resource { return &containerConfig{} },
+		func() resource.Resource { return &containerList{listSpec: envListSpec} },
+		func() resource.Resource { return &containerList{listSpec: mountListSpec} },
+	)
 }
 func (*routerProvider) DataSources(context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
