@@ -76,6 +76,64 @@ jobs:
         with:
           name: terraform-provider-routeros-packages
           path: release
+      - name: Sign and verify release checksums
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          let fingerprint = '76963B622D6FE389EB3F1C94EDEF61DC66116445'
+          let private_key = ($env.GPG_PRIVATE_KEY | default '')
+          let passphrase = ($env.GPG_PASSPHRASE | default '')
+          hide-env GPG_PRIVATE_KEY GPG_PASSPHRASE
+          if ($private_key | is-empty) or ($passphrase | is-empty) {
+            error make {msg: 'Release signing credentials are missing'}
+          }
+
+          cd release
+          let checksums = $"terraform-provider-routeros_($env.RELEASE_VERSION)_SHA256SUMS"
+          ^sha256sum --strict -c $checksums
+
+          let signer_home = (^mktemp -d | str trim)
+          let outcome = (with-env {GNUPGHOME: $signer_home} {
+            try {
+              let imported = ($private_key | ^gpg --batch --no-tty --import | complete)
+              if $imported.exit_code != 0 {
+                error make {msg: 'Could not import the release signing key'}
+              }
+              let keys = (^gpg --batch --with-colons --list-secret-keys $fingerprint | complete)
+              if $keys.exit_code != 0 {
+                error make {msg: 'The configured release signing fingerprint is unavailable'}
+              }
+              let primary = ($keys.stdout | lines | where { |line| $line | str starts-with 'fpr:' } | first | split row ':' | get 9)
+              if $primary != $fingerprint {
+                error make {msg: 'The imported key does not match the expected fingerprint'}
+              }
+
+              let signature = ($signer_home | path join $"($checksums).sig")
+              let signed = ($passphrase | ^gpg --batch --no-tty --pinentry-mode loopback --passphrase-fd 0 --local-user $fingerprint --no-armor --output $signature --detach-sign $checksums | complete)
+              if $signed.exit_code != 0 {
+                error make {msg: 'Could not sign release checksums'}
+              }
+              let verified = (^gpg --batch --status-fd 1 --verify $signature $checksums | complete)
+              if $verified.exit_code != 0 {
+                error make {msg: 'Release checksum signature verification failed'}
+              }
+              let signers = ($verified.stdout | lines | where { |line| $line | str starts-with '[GNUPG:] VALIDSIG ' })
+              if ($signers | length) != 1 or (($signers | first | split row ' ' | last) != $fingerprint) {
+                error make {msg: 'The verified signature has an unexpected primary fingerprint'}
+              }
+
+              mv $signature $"($checksums).sig"
+              print $"Verified release checksum signature from ($fingerprint)"
+              null
+            } catch {|failure| $failure.msg}
+          })
+          ^gpgconf --homedir $signer_home --kill gpg-agent | complete | ignore
+          rm -rf $signer_home
+          if $outcome != null {
+            error make {msg: $outcome}
+          }
       - name: Publish release and tag the built commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,6 +149,8 @@ jobs:
           if $releases.exit_code != 0 { error make {msg: "Could not check for an existing release or draft"} }
           if $tag in ($releases.stdout | lines) { error make {msg: $"A release or draft for ($tag) already exists"} }
 
-          let files = (glob $"($prefix)_*.zip" | append [$"($prefix)_manifest.json" $"($prefix)_SHA256SUMS"])
+          let signature = $"($prefix)_SHA256SUMS.sig"
+          if not ($signature | path exists) { error make {msg: 'Release checksum signature is missing'} }
+          let files = (glob $"($prefix)_*.zip" | append [$"($prefix)_manifest.json" $"($prefix)_SHA256SUMS" $signature])
           ^gh api --method POST $"repos/($repo)/git/refs" -f $"ref=refs/tags/($tag)" -f $"sha=($env.GITHUB_SHA)"
           ^gh release create $tag ...$files --repo $repo --verify-tag --title $tag --generate-notes
