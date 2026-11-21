@@ -66,7 +66,7 @@ run "container_mode_disabled" {
 }
 
 run "container_workload" {
-  command = plan
+  command = apply
 
   module {
     source = "./tests/fixtures/container"
@@ -77,12 +77,45 @@ run "container_workload" {
   }
 
   assert {
-    condition     = routeros_container.agent.interface == "veth-agent" && routeros_container.agent.envlists == "agent" && routeros_container.agent.mountlists == "agent"
-    error_message = "The container must reference its veth, environment and mount lists."
+    condition     = routeros_container.agent.interface == "veth-agent" && routeros_container.agent.envlists == tolist(["common", "agent"]) && routeros_container.agent.mountlists == tolist(["agent"])
+    error_message = "The container must reference its veth and several env and mount lists by name."
+  }
+
+  assert {
+    condition     = length(routeros_container_env.agent) == 3 && length(routeros_container_mount.agent) == 2 && alltrue([for key, env in routeros_container_env.agent : env.list == "agent" && env.key == key])
+    error_message = "One list holds several entries with distinct keys."
   }
 
   assert {
     condition     = routeros_container_config.this.password_wo == null
-    error_message = "The registry password is write-only and must not appear in the plan."
+    error_message = "The registry password is write-only and must not appear in the plan or state."
+  }
+}
+
+run "container_list_entries_change" {
+  command = apply
+
+  module {
+    source = "./tests/fixtures/container"
+  }
+
+  variables {
+    registry_token = "not-a-real-token"
+    previous_id    = run.container_workload.container_id
+    envs = {
+      POD_NAMESPACE = "agents"
+      IDENTITY      = "router"
+      OTLP_ENDPOINT = "http://metrics:9090"
+    }
+  }
+
+  assert {
+    condition     = routeros_container.agent.id == var.previous_id
+    error_message = "Adding or removing a list entry must not replace the container."
+  }
+
+  assert {
+    condition     = join(",", sort(keys(routeros_container_env.agent))) == "IDENTITY,OTLP_ENDPOINT,POD_NAMESPACE" && length(routeros_container_mount.agent) == 2
+    error_message = "Other entries must stay in place."
   }
 }

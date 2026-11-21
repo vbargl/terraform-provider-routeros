@@ -130,6 +130,14 @@ func resourcePlan(t *testing.T, r resource.Resource, values map[string]string) t
 		}
 	}
 	for name, value := range values {
+		if list, ok := objectType.AttributeTypes[name].(tftypes.List); ok {
+			elements := []tftypes.Value{}
+			for _, element := range splitList(value) {
+				elements = append(elements, tftypes.NewValue(list.ElementType, element))
+			}
+			raw[name] = tftypes.NewValue(list, elements)
+			continue
+		}
 		raw[name] = tftypes.NewValue(tftypes.String, value)
 	}
 	return tfsdk.Plan{Schema: schema.Schema, Raw: tftypes.NewValue(objectType, raw)}
@@ -267,13 +275,18 @@ func TestContainerSchemaReplacesOnImageChange(t *testing.T) {
 	var resp resource.SchemaResponse
 	(&container{}).Schema(t.Context(), resource.SchemaRequest{}, &resp)
 	replaces := func(name string) bool {
-		attribute := resp.Schema.Attributes[name].(schema.StringAttribute)
-		for _, modifier := range attribute.PlanModifiers {
-			if strings.Contains(modifier.Description(t.Context()), "destroy and recreate") {
-				return true
+		var descriptions []string
+		switch attribute := resp.Schema.Attributes[name].(type) {
+		case schema.StringAttribute:
+			for _, modifier := range attribute.PlanModifiers {
+				descriptions = append(descriptions, modifier.Description(t.Context()))
+			}
+		case schema.ListAttribute:
+			for _, modifier := range attribute.PlanModifiers {
+				descriptions = append(descriptions, modifier.Description(t.Context()))
 			}
 		}
-		return false
+		return strings.Contains(strings.Join(descriptions, ";"), "destroy and recreate")
 	}
 	for _, name := range []string{"remote_image", "file", "root_dir", "envlists", "mountlists", "interface", "name", "restart_policy"} {
 		if !replaces(name) {

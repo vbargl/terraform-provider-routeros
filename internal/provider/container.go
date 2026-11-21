@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -29,10 +32,13 @@ var (
 // replaces the container: RouterOS rejects most changes to a running container,
 // and the intended workloads are stateless.
 var containerFields = []string{
-	"name", "remote-image", "file", "interface", "root-dir", "envlists", "mountlists",
+	"name", "remote-image", "file", "interface", "root-dir",
 	"cmd", "entrypoint", "hostname", "user", "workdir", "dns",
 	"logging", "restart-policy", "check-certificate", "start-on-boot", "comment",
 }
+
+// List references. RouterOS 7.25 accepts several comma-separated list names.
+var containerLists = []string{"envlists", "mountlists"}
 
 var containerDefaults = map[string]string{"logging": "no", "restart-policy": "no", "check-certificate": "yes", "start-on-boot": "no"}
 
@@ -53,8 +59,6 @@ func (*container) Schema(_ context.Context, _ resource.SchemaRequest, resp *reso
 		"file":              "Image tar file already on the router. Set exactly one of remote_image and file.",
 		"interface":         "veth interface of the container.",
 		"root-dir":          "Directory for the extracted image, for example usb1/containers/name or a tmpfs disk.",
-		"envlists":          "Comma-separated routeros_container_env list names.",
-		"mountlists":        "Comma-separated routeros_container_mount list names.",
 		"logging":           "yes or no: forward container output to the RouterOS log.",
 		"restart-policy":    "no, on-failure or always.",
 		"check-certificate": "yes or no: verify the registry TLS certificate.",
@@ -85,6 +89,15 @@ func (*container) Schema(_ context.Context, _ resource.SchemaRequest, resp *reso
 		}
 		attributes[attr(field).String()] = attribute
 	}
+	for field, description := range map[string]string{
+		"envlists":   "Names of routeros_container_env lists. Order is kept; a reordered list read from the router is not drift.",
+		"mountlists": "Names of routeros_container_mount lists. Order is kept; a reordered list read from the router is not drift.",
+	} {
+		attributes[attr(field).String()] = schema.ListAttribute{
+			ElementType: types.StringType, Optional: true, Computed: true, Description: description + " Omit to leave the router's value unmanaged.",
+			PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown(), listplanmodifier.RequiresReplace()},
+		}
+	}
 	resp.Schema = schema.Schema{
 		Description: "Manage a RouterOS container. Requires container mode in /system/device-mode and the container package.",
 		Attributes:  attributes,
@@ -108,6 +121,26 @@ func (r *container) ValidateConfig(ctx context.Context, req resource.ValidateCon
 	image, file := values["remote-image"], values["file"]
 	if !image.IsUnknown() && !file.IsUnknown() && (image.ValueString() == "") == (file.ValueString() == "") {
 		resp.Diagnostics.AddAttributeError(attr("remote-image"), "Image source required", "Set exactly one of remote_image and file.")
+	}
+	for _, field := range containerLists {
+		var names types.List
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, attr(field), &names)...)
+		if names.IsNull() || names.IsUnknown() {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, element := range names.Elements() {
+			name, ok := element.(types.String)
+			if !ok || name.IsUnknown() {
+				continue
+			}
+			value := name.ValueString()
+			if !listName.MatchString(value) || seen[value] {
+				resp.Diagnostics.AddAttributeError(attr(field), "Invalid list reference", "Use distinct, non-empty list names without commas or spaces.")
+				break
+			}
+			seen[value] = true
+		}
 	}
 	allowed := map[string][]string{
 		"logging": {"yes", "no"}, "check-certificate": {"yes", "no"}, "start-on-boot": {"yes", "no"}, "running": {"yes", "no"},
@@ -165,7 +198,7 @@ func (r *container) read(ctx context.Context, id string) (map[string]string, err
 	if !objectID.MatchString(id) {
 		return nil, errors.New("expected a RouterOS object ID")
 	}
-	fields := append(append([]string{".id"}, containerFields...), containerFlags...)
+	fields := append(append(append([]string{".id"}, containerFields...), containerLists...), containerFlags...)
 	rows, _, err := r.client.run(ctx, "/container/print", "=.proplist="+strings.Join(fields, ","), "?.id="+strings.ToUpper(id))
 	if err != nil {
 		return nil, err
@@ -215,6 +248,21 @@ func (r *container) store(ctx context.Context, state *tfsdk.State, expected obje
 		}
 		diagnostics.Append(state.SetAttribute(ctx, attr(field), value)...)
 	}
+	for _, field := range containerLists {
+		var prior types.List
+		diagnostics.Append(expected.GetAttribute(ctx, attr(field), &prior)...)
+		names := splitList(row[field])
+		value, d := types.ListValueFrom(ctx, types.StringType, names)
+		diagnostics.Append(d...)
+		if !prior.IsNull() && !prior.IsUnknown() {
+			var wanted []string
+			diagnostics.Append(prior.ElementsAs(ctx, &wanted, false)...)
+			if sameNames(wanted, names) {
+				value = prior
+			}
+		}
+		diagnostics.Append(state.SetAttribute(ctx, attr(field), value)...)
+	}
 	observed := containerState(row)
 	running := "no"
 	if observed == "running" || observed == "starting" {
@@ -259,6 +307,16 @@ func (r *container) Create(ctx context.Context, req resource.CreateRequest, resp
 		}
 		words = append(words, "="+field+"="+value.ValueString())
 	}
+	for _, field := range containerLists {
+		var names types.List
+		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, attr(field), &names)...)
+		if names.IsNull() || names.IsUnknown() || len(names.Elements()) == 0 {
+			continue
+		}
+		var values []string
+		resp.Diagnostics.Append(names.ElementsAs(ctx, &values, false)...)
+		words = append(words, "="+field+"="+strings.Join(values, ","))
+	}
 	var running types.String
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("running"), &running)...)
 	if resp.Diagnostics.HasError() {
@@ -282,6 +340,13 @@ func (r *container) Create(ctx context.Context, req resource.CreateRequest, resp
 		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, attr(field), &value)...)
 		if value.IsUnknown() {
 			resp.Diagnostics.Append(resp.State.SetAttribute(ctx, attr(field), types.StringValue(""))...)
+		}
+	}
+	for _, field := range containerLists {
+		var names types.List
+		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, attr(field), &names)...)
+		if names.IsUnknown() {
+			resp.Diagnostics.Append(resp.State.SetAttribute(ctx, attr(field), types.ListValueMust(types.StringType, nil))...)
 		}
 	}
 	if _, err := r.wait(ctx, id, containerExtractTimeout, func(state string) bool { return state == "stopped" || state == "running" }); err != nil {
@@ -412,4 +477,27 @@ func (r *container) ImportState(ctx context.Context, req resource.ImportStateReq
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(strings.ToUpper(req.ID)))...)
+}
+
+// listName is a RouterOS env or mount list name usable in a comma-separated reference.
+var listName = regexp.MustCompile(`^[^,\s]+$`)
+
+func splitList(value string) []string {
+	names := []string{}
+	for _, name := range strings.Split(value, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }

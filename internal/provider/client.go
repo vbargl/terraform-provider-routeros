@@ -23,10 +23,14 @@ type routerClient struct {
 }
 
 // Aliases that use the same endpoint share these locks within the plugin process.
+// Rule menus need them for ordering; container env and mount lists need them so
+// that the duplicate check and the write are not interleaved.
 var orderedMenuLocks sync.Map
 
 func orderedMenuLock(address, menu string) *sync.Mutex {
-	if menu != "/ip/firewall/filter" && menu != "/ip/firewall/nat" {
+	switch menu {
+	case "/ip/firewall/filter", "/ip/firewall/nat", "/container/envs", "/container/mounts":
+	default:
 		return nil
 	}
 	lock, _ := orderedMenuLocks.LoadOrStore([2]string{address, menu}, &sync.Mutex{})
