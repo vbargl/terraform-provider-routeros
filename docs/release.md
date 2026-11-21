@@ -1,9 +1,7 @@
 # Release preparation
 
 The Registry source address is `vbargl/routeros`. The manifest advertises plugin protocol 6 and the GoReleaser configuration builds versioned binaries, ZIP archives and checksums. Test the configuration locally with `goreleaser release --snapshot --clean --skip=publish`.
-Run **Publish** in GitHub Actions and enter the version without the leading `v`. The default run uploads unsigned ZIPs, the Registry manifest and checksums as workflow artifacts.
-
-To publish those files as a GitHub Release, select `main` and enable **Publish a GitHub Release and tag from main**. After the build and tests pass, the workflow verifies the uploaded checksums, creates `v<version>` at the exact commit that was built and attaches the files to the release. An existing tag that points to a different commit causes the run to fail. The workflow produces an unsigned GitHub Release.
+Run **Publish** in GitHub Actions on `main` and enter the version without the leading `v`. After the build and tests pass, the workflow verifies the uploaded checksums, creates `v<version>` at the exact commit that was built and attaches the unsigned ZIPs, Registry manifest and checksums to a GitHub Release. An existing tag that points to a different commit causes the run to fail.
 
 ## Signing for Terraform Registry
 

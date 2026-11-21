@@ -7,10 +7,6 @@ on:
         description: Version without the v prefix
         required: true
         type: string
-      publish:
-        description: Publish a GitHub Release and tag from main
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -57,7 +53,7 @@ jobs:
             dist/*_SHA256SUMS
 
   publish:
-    if: inputs.publish && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     needs: package
     permissions:
       contents: write
