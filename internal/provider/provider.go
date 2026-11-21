@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"net"
 	"os"
-	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
@@ -79,10 +78,6 @@ func (*routerProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	if cfg.EphemeralAccess.ValueBool() {
 		resp.EphemeralResourceData = client
 	} else {
-		client.orderedLocks = map[string]*sync.Mutex{
-			"/ip/firewall/filter": {},
-			"/ip/firewall/nat":    {},
-		}
 		resp.ResourceData, resp.DataSourceData = client, client
 	}
 }

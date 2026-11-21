@@ -64,7 +64,7 @@ func normalizePrefix(value string) string {
 	return value
 }
 
-var routerDuration = regexp.MustCompile(`^(?:([0-9]{1,8})w)?(?:([0-9]{1,8})d)?(?:(\d{1,8}):(\d{2}):(\d{2}))?$`)
+var routerDuration = regexp.MustCompile(`^(?:([0-9]{1,8})w\s*)?(?:([0-9]{1,8})d\s*)?(?:(\d{1,8}):(\d{2}):(\d{2})|((?:[0-9]+[hms]\s*)+))?$`)
 
 func normalizeDuration(value string) string {
 	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
@@ -73,8 +73,16 @@ func normalizeDuration(value string) string {
 	if duration, err := time.ParseDuration(value); err == nil {
 		return duration.String()
 	}
-	if match := routerDuration.FindStringSubmatch(value); match != nil && value != "" {
+	trimmed := strings.TrimSpace(value)
+	if match := routerDuration.FindStringSubmatch(trimmed); match != nil && trimmed != "" {
 		var normalized time.Duration
+		if match[6] != "" {
+			suffix, err := time.ParseDuration(strings.Join(strings.Fields(match[6]), ""))
+			if err != nil {
+				return value
+			}
+			normalized = suffix
+		}
 		for index, unit := range []time.Duration{7 * 24 * time.Hour, 24 * time.Hour, time.Hour, time.Minute, time.Second} {
 			number, _ := strconv.ParseUint(match[index+1], 10, 32)
 			if number > uint64((time.Duration(1<<63-1)-normalized)/unit) {

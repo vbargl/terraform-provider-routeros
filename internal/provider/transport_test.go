@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"net"
@@ -103,30 +102,32 @@ func TestTLSAuthenticationAndRedactedTrap(t *testing.T) {
 	p := routerProvider{}
 	var schema provider.SchemaResponse
 	p.Schema(t.Context(), provider.SchemaRequest{}, &schema)
-	config := tfsdk.State{Schema: schema.Schema}
-	if diagnostics := config.Set(t.Context(), providerConfig{
-		Address: types.StringValue(net.JoinHostPort("localhost", port)), CACertFile: types.StringValue(caFile),
-	}); diagnostics.HasError() {
-		t.Fatal(diagnostics)
+	configure := func(address string) *routerClient {
+		t.Helper()
+		config := tfsdk.State{Schema: schema.Schema}
+		if diagnostics := config.Set(t.Context(), providerConfig{
+			Address: types.StringValue(address), CACertFile: types.StringValue(caFile),
+		}); diagnostics.HasError() {
+			t.Fatal(diagnostics)
+		}
+		req := provider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: config.Raw}}
+		var resp provider.ConfigureResponse
+		p.Configure(t.Context(), req, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatal(resp.Diagnostics)
+		}
+		result, ok := resp.ResourceData.(*routerClient)
+		if !ok {
+			t.Fatal("provider did not configure an API-SSL client")
+		}
+		return result
 	}
-	req := provider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: config.Raw}}
-	var resp provider.ConfigureResponse
-	p.Configure(t.Context(), req, &resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatal(resp.Diagnostics)
-	}
-	wrongName, ok := resp.ResourceData.(*routerClient)
-	if !ok || wrongName.tlsConfig.ServerName != "localhost" {
-		t.Fatal("provider did not configure the TLS name from the address")
-	}
+	wrongName := configure(net.JoinHostPort("localhost", port))
 	if _, _, err := wrongName.run(t.Context(), "/interface/wireguard/print"); err == nil || err.Error() != "API-SSL connection or certificate verification failed" {
 		t.Fatalf("expected trusted certificate with wrong name to be rejected, got %v", err)
 	}
-
-	roots := x509.NewCertPool()
-	roots.AddCert(certificateSource.Certificate())
-	client.tlsConfig.RootCAs = roots
-	if _, _, err := client.run(t.Context(), "/interface/wireguard/print", "=.proplist=.id,public-key"); err == nil ||
+	trusted := configure(address)
+	if _, _, err := trusted.run(t.Context(), "/interface/wireguard/print", "=.proplist=.id,public-key"); err == nil ||
 		err.Error() != "RouterOS rejected the command or the connection was interrupted" {
 		t.Fatalf("expected sanitized router trap, got %v", err)
 	}

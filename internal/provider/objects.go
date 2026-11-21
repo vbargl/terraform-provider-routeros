@@ -70,7 +70,7 @@ func (r *managedObject) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		}
 	}
 	if r.ordered {
-		attributes["place_before"] = schema.StringAttribute{Optional: true, Description: "ID of the immediate successor. Omit to leave position unmanaged. An empty string requests the end of the menu."}
+		attributes["place_before"] = schema.StringAttribute{Optional: true, Description: "ID of a rule that must appear later in the same menu. Omit to leave position unmanaged."}
 	}
 	resp.Schema = schema.Schema{Attributes: attributes}
 }
@@ -78,7 +78,7 @@ func (r *managedObject) Schema(_ context.Context, _ resource.SchemaRequest, resp
 func (r *managedObject) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	r.client, _ = req.ProviderData.(commandRunner)
 	if client, ok := req.ProviderData.(*routerClient); ok {
-		r.menuLock = client.orderedLocks[r.menu]
+		r.menuLock = orderedMenuLock(client.address, r.menu)
 	}
 }
 
@@ -91,7 +91,7 @@ func (r *managedObject) fields() []string {
 	return fields
 }
 
-func (r *managedObject) read(ctx context.Context, id string) (map[string]string, error) {
+func (r *managedObject) read(ctx context.Context, id, anchor string) (map[string]string, error) {
 	if !objectID.MatchString(id) {
 		return nil, errors.New("expected a RouterOS object ID")
 	}
@@ -118,10 +118,13 @@ func (r *managedObject) read(ctx context.Context, id string) (map[string]string,
 		if r.name == "wireguard_interface" && row["public-key"] == "" {
 			return nil, errors.New("RouterOS did not expose the public identity")
 		}
-		if r.ordered {
-			row["place-before"] = ""
-			if index+1 < len(rows) {
-				row["place-before"] = rows[index+1][".id"]
+		if r.ordered && anchor != "" {
+			delete(row, "place-before")
+			for _, later := range rows[index+1:] {
+				if strings.EqualFold(later[".id"], anchor) {
+					row["place-before"] = later[".id"]
+					break
+				}
 			}
 		}
 		return row, nil
@@ -144,7 +147,7 @@ func (r *managedObject) store(ctx context.Context, state *tfsdk.State, expected 
 		diagnostics.Append(expected.GetAttribute(ctx, attr(field), &prior)...)
 		value := types.StringValue(r.normalize(field, row[field]))
 		switch {
-		case field == "place-before" && prior.IsNull():
+		case field == "place-before" && row[field] == "":
 			value = types.StringNull()
 		case !prior.IsNull() && !prior.IsUnknown() && value.ValueString() == r.normalize(field, prior.ValueString()):
 			value = prior
@@ -170,7 +173,18 @@ func (r *managedObject) Read(ctx context.Context, req resource.ReadRequest, resp
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	row, err := r.read(ctx, id.ValueString())
+	var anchor types.String
+	if r.ordered {
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, attr("place-before"), &anchor)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if r.menuLock != nil {
+		r.menuLock.Lock()
+		defer r.menuLock.Unlock()
+	}
+	row, err := r.read(ctx, id.ValueString(), anchor.ValueString())
 	switch {
 	case err != nil:
 		resp.Diagnostics.AddError("Read RouterOS object", err.Error())
@@ -189,11 +203,21 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 		r.menuLock.Lock()
 		defer r.menuLock.Unlock()
 	}
+	var anchor types.String
+	if r.ordered {
+		diagnostics.Append(plan.GetAttribute(ctx, attr("place-before"), &anchor)...)
+		if anchor.IsUnknown() || (!anchor.IsNull() && (!objectID.MatchString(anchor.ValueString()) || strings.EqualFold(anchor.ValueString(), id))) {
+			diagnostics.AddError("Invalid rule anchor", "Supply the RouterOS object ID of another rule in the same menu.")
+		}
+	}
+	if diagnostics.HasError() {
+		return
+	}
 	command := "add"
 	var current map[string]string
 	if id != "" {
 		var err error
-		current, err = r.read(ctx, id)
+		current, err = r.read(ctx, id, anchor.ValueString())
 		if err != nil {
 			diagnostics.AddError("Check RouterOS object", err.Error())
 			return
@@ -225,7 +249,7 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 			words = append(words, "="+field+"="+value.ValueString())
 		}
 	}
-	r.validateValues(values, diagnostics)
+	r.validateValues(values, nil, diagnostics)
 	if r.name == "nat_rule" && !diagnostics.HasError() {
 		vpnInterface := values["out-interface"]
 		if values["chain"] == "dstnat" {
@@ -237,18 +261,31 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 		}
 	}
 
-	var anchor types.String
-	if r.ordered {
-		diagnostics.Append(plan.GetAttribute(ctx, attr("place-before"), &anchor)...)
-		if anchor.IsUnknown() || (anchor.ValueString() != "" && (!objectID.MatchString(anchor.ValueString()) || strings.EqualFold(anchor.ValueString(), id))) {
-			diagnostics.AddError("Invalid rule successor", "The successor must be another rule's RouterOS object ID.")
-		}
-		if command == "add" && anchor.ValueString() != "" {
-			words = append(words, "=place-before="+strings.ToUpper(anchor.ValueString()))
-		}
+	if command == "add" && !anchor.IsNull() && anchor.ValueString() != "" {
+		words = append(words, "=place-before="+strings.ToUpper(anchor.ValueString()))
 	}
 	if diagnostics.HasError() {
 		return
+	}
+	needsMove := r.ordered && command == "set" && !anchor.IsNull() && current["place-before"] == ""
+	move := func() bool {
+		_, _, err := r.client.run(ctx, r.menu+"/move", "=numbers="+id, "=destination="+strings.ToUpper(anchor.ValueString()))
+		if err != nil {
+			diagnostics.AddError("Move RouterOS rule", err.Error())
+		}
+		return err == nil
+	}
+	// Move a rule that should be enabled before applying its settings. A failed
+	// move must not enable a rule at the old position.
+	if needsMove && values["disabled"] == "no" {
+		if !move() {
+			return
+		}
+		position, err := r.read(ctx, id, anchor.ValueString())
+		if err != nil || position["place-before"] == "" {
+			diagnostics.AddError("Verify RouterOS rule position", "The rule's position could not be verified. Rule settings were left untouched.")
+			return
+		}
 	}
 	var createdID string
 	if command == "add" || len(words) > 2 {
@@ -272,24 +309,22 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 		}
 	}
 	diagnostics.Append(state.SetAttribute(ctx, path.Root("id"), types.StringValue(id))...)
-	if r.ordered && command == "set" && !anchor.IsNull() && !strings.EqualFold(current["place-before"], anchor.ValueString()) {
-		move := []string{r.menu + "/move", "=numbers=" + id}
-		if anchor.ValueString() != "" {
-			move = append(move, "=destination="+strings.ToUpper(anchor.ValueString()))
-		}
-		if _, _, err := r.client.run(ctx, move...); err != nil {
-			diagnostics.AddError("Move RouterOS rule", err.Error())
-			return
-		}
+	// A rule that should be disabled can only move after it is disabled.
+	if needsMove && values["disabled"] == "yes" && !move() {
+		return
 	}
-	row, err := r.read(ctx, id)
+	row, err := r.read(ctx, id, anchor.ValueString())
 	if err != nil || row == nil {
 		detail := fmt.Sprintf("Object %s could not be read after the write.", id)
 		if err != nil {
 			detail += " " + err.Error()
 		}
 		if command == "add" {
-			diagnostics.AddWarning("RouterOS object was created but could not be verified", detail+" Its ID was retained. Refresh before applying again.")
+			detail += " Its ID was retained. Refresh before applying again."
+			if r.name == "wireguard_interface" {
+				detail += " The public_key output is null until refresh succeeds. Do not deploy dependent peer configuration from this result."
+			}
+			diagnostics.AddWarning("RouterOS object was created but could not be verified", detail)
 		} else {
 			diagnostics.AddError("Verify RouterOS object", detail)
 		}
@@ -321,7 +356,7 @@ func (r *managedObject) Delete(ctx context.Context, req resource.DeleteRequest, 
 		r.menuLock.Lock()
 		defer r.menuLock.Unlock()
 	}
-	row, err := r.read(ctx, id.ValueString())
+	row, err := r.read(ctx, id.ValueString(), "")
 	if err == nil && row != nil {
 		_, _, err = r.client.run(ctx, r.menu+"/remove", "=.id="+row[".id"])
 	}
@@ -339,65 +374,89 @@ func (r *managedObject) ImportState(ctx context.Context, req resource.ImportStat
 
 func (r *managedObject) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	values := make(map[string]string)
+	unknown := make(map[string]bool)
 	for _, field := range r.fields() {
 		var value types.String
 		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, attr(field), &value)...)
-		if value.IsUnknown() {
-			return // Apply validates again after references resolve.
-		}
-		if !value.IsNull() {
+		switch {
+		case value.IsUnknown():
+			unknown[field] = true
+		case !value.IsNull():
 			values[field] = value.ValueString()
 		}
 	}
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	r.validateValues(values, &resp.Diagnostics)
-}
-
-func (r *managedObject) validateValues(values map[string]string, diagnostics *diag.Diagnostics) {
-	for _, field := range r.required {
-		if value, known := values[field]; known && value == "" {
-			diagnostics.AddError("Empty required RouterOS setting", fmt.Sprintf("Supply a value for %s.", attr(field)))
+	if r.ordered {
+		var anchor types.String
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, attr("place-before"), &anchor)...)
+		if !anchor.IsNull() && !anchor.IsUnknown() && !objectID.MatchString(anchor.ValueString()) {
+			resp.Diagnostics.AddAttributeError(attr("place-before"), "Invalid rule anchor", "Supply a RouterOS object ID or omit this attribute.")
 		}
 	}
-	if value, known := values["disabled"]; known && value != "yes" && value != "no" {
-		diagnostics.AddError("Invalid disabled value", "Use yes or no.")
+	if !resp.Diagnostics.HasError() {
+		r.validateValues(values, unknown, &resp.Diagnostics)
 	}
-	if r.ordered {
-		for _, field := range []string{"src-address", "dst-address"} {
-			prefix, err := netip.ParsePrefix(values[field])
+}
+
+func (r *managedObject) validateValues(values map[string]string, unknown map[string]bool, diagnostics *diag.Diagnostics) {
+	for _, field := range r.required {
+		if value, known := values[field]; known && value == "" {
+			diagnostics.AddAttributeError(attr(field), "Empty required RouterOS setting", "Supply a value.")
+		}
+	}
+	for _, entry := range r.optional {
+		field, defaultValue, _ := strings.Cut(entry, "=")
+		if value, known := values[field]; known && value == "" && defaultValue != "" {
+			diagnostics.AddAttributeError(attr(field), "Empty RouterOS setting", "Supply a value or omit the attribute to use its default.")
+		}
+	}
+	if value, known := values["disabled"]; known && value != "" && value != "yes" && value != "no" {
+		diagnostics.AddAttributeError(attr("disabled"), "Invalid disabled value", "Use yes or no.")
+	}
+	if !r.ordered {
+		return
+	}
+	for _, field := range []string{"src-address", "dst-address"} {
+		if value, known := values[field]; known {
+			prefix, err := netip.ParsePrefix(value)
 			if err != nil || !prefix.Addr().Is4() || (r.name == "nat_rule" && prefix.Bits() == 0) {
-				diagnostics.AddError("Invalid rule match", "Supply explicit IPv4 source and destination prefixes. NAT requires prefixes narrower than /0.")
+				diagnostics.AddAttributeError(attr(field), "Invalid rule match", "Supply an explicit IPv4 prefix. NAT requires a prefix narrower than /0.")
 			}
 		}
 	}
-	if r.name == "nat_rule" && !diagnostics.HasError() {
-		vpnInterface := values["out-interface"]
-		target, err := netip.ParseAddr(values["to-addresses"])
-		valid := err == nil && target.Is4()
-		switch values["chain"] {
-		case "srcnat":
-			valid = valid && (values["action"] == "src-nat" || values["action"] == "netmap")
-		case "dstnat":
-			valid = valid && (values["action"] == "dst-nat" || values["action"] == "netmap")
-			vpnInterface = values["in-interface"]
-		default:
-			valid = false
+	if r.name == "nat_rule" {
+		if value, known := values["to-addresses"]; known {
+			target, err := netip.ParseAddr(value)
+			if err != nil || !target.Is4() {
+				diagnostics.AddAttributeError(attr("to-addresses"), "Invalid NAT target", "Supply a single IPv4 address.")
+			}
 		}
-		if !valid || vpnInterface == "" {
-			diagnostics.AddError("Invalid scoped NAT rule", "Supply a single IPv4 target, a matching NAT action and the VPN interface in the direction of the chain.")
+		if action, known := values["action"]; known && action != "src-nat" && action != "dst-nat" && action != "netmap" {
+			diagnostics.AddAttributeError(attr("action"), "Unsupported NAT action", "Use src-nat, dst-nat or netmap.")
+		}
+		if chain, known := values["chain"]; known {
+			switch chain {
+			case "srcnat", "dstnat":
+				interfaceField, action := "out-interface", "src-nat"
+				if chain == "dstnat" {
+					interfaceField, action = "in-interface", "dst-nat"
+				}
+				if configured, exists := values["action"]; exists && configured != action && configured != "netmap" {
+					diagnostics.AddAttributeError(attr("action"), "NAT action does not match the chain", "Use "+action+" or netmap.")
+				}
+				if !unknown[interfaceField] && values[interfaceField] == "" {
+					diagnostics.AddAttributeError(attr(interfaceField), "Missing WireGuard scope", "Specify the WireGuard interface in the direction of the chain.")
+				}
+			default:
+				diagnostics.AddAttributeError(attr("chain"), "Unsupported NAT chain", "Use srcnat or dstnat.")
+			}
 		}
 	}
 	if r.name == "firewall_rule" {
-		switch values["action"] {
-		case "accept", "drop", "reject":
-		default:
-			diagnostics.AddError("Unsupported filter action", "Use accept, drop or reject.")
+		if action, known := values["action"]; known && action != "accept" && action != "drop" && action != "reject" {
+			diagnostics.AddAttributeError(attr("action"), "Unsupported filter action", "Use accept, drop or reject.")
 		}
-		if values["chain"] == "" || (values["dst-port"] != "" && values["protocol"] != "tcp" && values["protocol"] != "udp") {
-			diagnostics.AddError("Invalid filter rule", "Specify a chain and use tcp or udp when matching a destination port.")
+		if port := values["dst-port"]; port != "" && !unknown["protocol"] && values["protocol"] != "tcp" && values["protocol"] != "udp" {
+			diagnostics.AddAttributeError(attr("protocol"), "Invalid filter protocol", "Use tcp or udp when matching a destination port.")
 		}
 	}
-
 }

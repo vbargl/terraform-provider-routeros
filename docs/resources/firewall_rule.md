@@ -1,11 +1,11 @@
 ---
 page_title: "routeros_firewall_rule (Resource)"
-description: "Manage an IPv4 filter rule with explicit source and destination prefixes and an accept, drop or reject action. Use TCP or UDP to match a destination port. Set place_before to the ID of the immediate successor in the same menu. Omit the attribute to leave ordering unmanaged. An explicit empty string keeps the rule at the end. Rules default to disabled."
+description: "Manage an IPv4 filter rule with explicit source and destination prefixes and an accept, drop or reject action. Use TCP or UDP to match a destination port. Set place_before to the ID of a rule that must appear later in the same menu. Several rules may share this anchor. Omit the attribute to leave ordering unmanaged. Rules default to disabled."
 ---
 
 # routeros_firewall_rule (Resource)
 
-Manage an IPv4 filter rule with explicit source and destination prefixes and an accept, drop or reject action. Use TCP or UDP to match a destination port. Set `place_before` to the ID of the immediate successor in the same menu. Omit the attribute to leave ordering unmanaged. An explicit empty string keeps the rule at the end. Rules default to disabled.
+Manage an IPv4 filter rule with explicit source and destination prefixes and an accept, drop or reject action. Use TCP or UDP to match a destination port. Set `place_before` to the ID of a rule that must appear later in the same menu. Several rules may share this anchor. Omit the attribute to leave ordering unmanaged. Rules default to disabled.
 
 The resource uses RouterOS string representations.
 

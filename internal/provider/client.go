@@ -20,7 +20,17 @@ type routerClient struct {
 	address            string
 	tlsConfig          *tls.Config
 	username, password string
-	orderedLocks       map[string]*sync.Mutex
+}
+
+// Aliases that use the same endpoint share these locks within the plugin process.
+var orderedMenuLocks sync.Map
+
+func orderedMenuLock(address, menu string) *sync.Mutex {
+	if menu != "/ip/firewall/filter" && menu != "/ip/firewall/nat" {
+		return nil
+	}
+	lock, _ := orderedMenuLocks.LoadOrStore([2]string{address, menu}, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 func (c *routerClient) run(ctx context.Context, words ...string) ([]map[string]string, string, error) {
