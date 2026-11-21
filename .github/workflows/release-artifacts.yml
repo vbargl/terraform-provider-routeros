@@ -42,8 +42,7 @@ jobs:
         run: |
           let prefix = $"terraform-provider-routeros_($env.RELEASE_VERSION)"
           cp terraform-registry-manifest.json (['dist' $"($prefix)_manifest.json"] | path join)
-          cd dist
-          ^sha256sum -c $"($prefix)_SHA256SUMS"
+          nu --no-config-file scripts/verify-release.nu dist $env.RELEASE_VERSION
       - uses: actions/upload-artifact@v6
         with:
           name: terraform-provider-routeros-packages

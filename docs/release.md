@@ -14,6 +14,9 @@ revision and its CI checks passed. Do not assume a particular version is
 approved. The commands below use `VERSION` (without `v`) and `COMMIT` (the
 full reviewed Git SHA) supplied by the operator.
 
+The verifier requires Nushell, `sha256sum` and `unzip`; signed verification also
+requires GnuPG and the expected public key in the operator keyring.
+
 Verify the source on a clean checkout and ensure GoReleaser reads the exact
 commit. For artifact-only review, start the `Prepare release artifacts`
 workflow on that commit with its `version` input. Inspect the workflow run's
@@ -26,15 +29,15 @@ RELEASE_VERSION="$VERSION" goreleaser release --snapshot --clean --skip=publish
 ```
 
 Copy `terraform-registry-manifest.json` to the versioned filename in `dist/`
-as the workflow does, then verify from `dist/`:
+as the workflow does, then verify from the repository root:
 
 ```sh
-sha256sum -c "terraform-provider-routeros_${VERSION}_SHA256SUMS"
+nu --no-config-file scripts/verify-release.nu dist "$VERSION"
 ```
 
 Confirm that the archive and binary names, versioned manifest and checksums
 match the version and supported platforms. GoReleaser's snapshot version comes
-from `RELEASE_VERSION`; verify the actual binary version and `COMMIT` before
+from `RELEASE_VERSION`; verify the versioned binary filename and `COMMIT` before
 using those artifacts. The Registry manifest is also included in the checksum
 file. Never substitute a different commit merely because its version matches.
 
@@ -50,7 +53,7 @@ separate key-management design has been approved.
 ```sh
 gpg --batch --local-user "$RELEASE_GPG_FINGERPRINT" --detach-sign \
   --output "${CHECKSUM_FILE}.sig" "$CHECKSUM_FILE"
-gpg --verify "${CHECKSUM_FILE}.sig" "$CHECKSUM_FILE"
+nu --no-config-file scripts/verify-release.nu dist "$VERSION" --signer "$RELEASE_GPG_FINGERPRINT"
 ```
 
 Create the version tag pointing to the reviewed `COMMIT`. Publish a GitHub
