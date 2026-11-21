@@ -15,6 +15,7 @@ References: [RouterOS API](https://help.mikrotik.com/docs/spaces/ROS/pages/47579
 ## Initial scope and tradeoffs
 
 - Manage IPv4 interfaces and routes, WireGuard, DHCP servers and pools, DHCP network options and static leases. Dynamic leases use a read-only data source.
+- Observe device mode and individual packages with read-only data sources so configurations can assert prerequisites such as container mode. Device mode needs physical confirmation and packages need a reboot, so the provider does not change either.
 - Manage IPv4 WireGuard-scoped source and destination NAT and explicit IPv4 filter rules. New rules default to disabled. Omit `place_before` to leave ordering unmanaged. To enforce relative order, reference a rule that must appear later in the same menu. Several rules can share an anchor. To constrain order among them, chain references to later rules. An imported rule starts with unmanaged ordering. Writes to an ordered menu are serialized per endpoint and menu within a plugin process. Coordinate changes through one state and avoid external writers during an apply.
 - Bifrost owns the ash-twin alias. Its existing default gateway, individual VPN addresses, ACLs and failover remain deployment decisions.
 - RouterOS 7.24.6 is the first qualification target. Passing mocked or wire-level tests does not qualify a RouterOS version. Publish a compatibility claim only after the isolated CHR suite passes, including ordering and normalization checks for any newly advertised resources.
