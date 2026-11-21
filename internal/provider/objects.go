@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -40,7 +41,8 @@ var objects = []definition{
 
 type managedObject struct {
 	definition
-	client commandRunner
+	client   commandRunner
+	menuLock *sync.Mutex
 }
 
 var objectID = regexp.MustCompile(`^\*[0-9A-Fa-f]+$`)
@@ -63,16 +65,21 @@ func (r *managedObject) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		attributes[attr(field).String()] = schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString(defaultValue)}
 	}
 	for _, field := range r.computed {
-		attributes[attr(field).String()] = schema.StringAttribute{Computed: true}
+		attributes[attr(field).String()] = schema.StringAttribute{
+			Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+		}
 	}
 	if r.ordered {
-		attributes["place_before"] = schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString(""), Description: "ID of the immediate successor. Empty appends to the end."}
+		attributes["place_before"] = schema.StringAttribute{Optional: true, Description: "ID of the immediate successor. Omit to leave position unmanaged. An empty string requests the end of the menu."}
 	}
 	resp.Schema = schema.Schema{Attributes: attributes}
 }
 
 func (r *managedObject) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	r.client, _ = req.ProviderData.(commandRunner)
+	if client, ok := req.ProviderData.(*routerClient); ok {
+		r.menuLock = client.orderedLocks[r.menu]
+	}
 }
 
 func (r *managedObject) fields() []string {
@@ -95,14 +102,14 @@ func (r *managedObject) read(ctx context.Context, id string) (map[string]string,
 	}
 	words := []string{r.menu + "/print", "=.proplist=" + strings.Join(fields, ",")}
 	if !r.ordered {
-		words = append(words, "?.id="+id)
+		words = append(words, "?.id="+strings.ToUpper(id))
 	}
 	rows, _, err := r.client.run(ctx, words...)
 	if err != nil {
 		return nil, err
 	}
 	for index, row := range rows {
-		if row[".id"] != id {
+		if !strings.EqualFold(row[".id"], id) {
 			continue
 		}
 		if row["dynamic"] == "true" || row["dynamic"] == "yes" {
@@ -111,36 +118,38 @@ func (r *managedObject) read(ctx context.Context, id string) (map[string]string,
 		if r.name == "wireguard_interface" && row["public-key"] == "" {
 			return nil, errors.New("RouterOS did not expose the public identity")
 		}
-		if r.ordered && index+1 < len(rows) {
-			row["place-before"] = rows[index+1][".id"]
+		if r.ordered {
+			row["place-before"] = ""
+			if index+1 < len(rows) {
+				row["place-before"] = rows[index+1][".id"]
+			}
 		}
 		return row, nil
 	}
 	return nil, nil
 }
 
-func (r *managedObject) store(ctx context.Context, state *tfsdk.State, row map[string]string, diagnostics *diag.Diagnostics) {
+type objectAttributes interface {
+	GetAttribute(context.Context, path.Path, any) diag.Diagnostics
+}
+
+func (r *managedObject) store(ctx context.Context, state *tfsdk.State, expected objectAttributes, row map[string]string, diagnostics *diag.Diagnostics) {
 	diagnostics.Append(state.SetAttribute(ctx, path.Root("id"), types.StringValue(row[".id"]))...)
 	fields := append(r.fields(), r.computed...)
 	if r.ordered {
 		fields = append(fields, "place-before")
 	}
 	for _, field := range fields {
-		value := row[field]
-		if r.ordered && (field == "src-address" || field == "dst-address") {
-			if address, err := netip.ParseAddr(value); err == nil && address.Is4() {
-				value = netip.PrefixFrom(address, 32).String()
-			}
+		var prior types.String
+		diagnostics.Append(expected.GetAttribute(ctx, attr(field), &prior)...)
+		value := types.StringValue(r.normalize(field, row[field]))
+		switch {
+		case field == "place-before" && prior.IsNull():
+			value = types.StringNull()
+		case !prior.IsNull() && !prior.IsUnknown() && value.ValueString() == r.normalize(field, prior.ValueString()):
+			value = prior
 		}
-		if field == "disabled" {
-			switch value {
-			case "true", "yes":
-				value = "yes"
-			case "false", "no", "":
-				value = "no"
-			}
-		}
-		diagnostics.Append(state.SetAttribute(ctx, attr(field), types.StringValue(value))...)
+		diagnostics.Append(state.SetAttribute(ctx, attr(field), value)...)
 	}
 }
 
@@ -168,13 +177,17 @@ func (r *managedObject) Read(ctx context.Context, req resource.ReadRequest, resp
 	case row == nil:
 		resp.State.RemoveResource(ctx)
 	default:
-		r.store(ctx, &resp.State, row, &resp.Diagnostics)
+		r.store(ctx, &resp.State, req.State, row, &resp.Diagnostics)
 	}
 }
 
 func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk.State, id string, diagnostics *diag.Diagnostics) {
 	if !r.ready(diagnostics) {
 		return
+	}
+	if r.menuLock != nil {
+		r.menuLock.Lock()
+		defer r.menuLock.Unlock()
 	}
 	command := "add"
 	var current map[string]string
@@ -199,8 +212,157 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 	for _, field := range r.fields() {
 		var value types.String
 		diagnostics.Append(plan.GetAttribute(ctx, attr(field), &value)...)
+		if value.IsUnknown() {
+			diagnostics.AddError("Unknown RouterOS setting", fmt.Sprintf("The value of %s must be known before writing the object.", attr(field)))
+		}
 		values[field] = value.ValueString()
-		words = append(words, "="+field+"="+value.ValueString())
+		switch {
+		case command == "add" && value.ValueString() == "":
+			// Let RouterOS apply its defaults for omitted empty attributes.
+		case command == "set" && r.normalize(field, current[field]) == r.normalize(field, value.ValueString()):
+			// Send only changes, including an empty value to clear a setting.
+		default:
+			words = append(words, "="+field+"="+value.ValueString())
+		}
+	}
+	r.validateValues(values, diagnostics)
+	if r.name == "nat_rule" && !diagnostics.HasError() {
+		vpnInterface := values["out-interface"]
+		if values["chain"] == "dstnat" {
+			vpnInterface = values["in-interface"]
+		}
+		rows, _, err := r.client.run(ctx, "/interface/wireguard/print", "=.proplist=name", "?name="+vpnInterface)
+		if err != nil || len(rows) != 1 || rows[0]["name"] != vpnInterface {
+			diagnostics.AddError("WireGuard scope unavailable", "The selected VPN interface must be a readable WireGuard interface on this router.")
+		}
+	}
+
+	var anchor types.String
+	if r.ordered {
+		diagnostics.Append(plan.GetAttribute(ctx, attr("place-before"), &anchor)...)
+		if anchor.IsUnknown() || (anchor.ValueString() != "" && (!objectID.MatchString(anchor.ValueString()) || strings.EqualFold(anchor.ValueString(), id))) {
+			diagnostics.AddError("Invalid rule successor", "The successor must be another rule's RouterOS object ID.")
+		}
+		if command == "add" && anchor.ValueString() != "" {
+			words = append(words, "=place-before="+strings.ToUpper(anchor.ValueString()))
+		}
+	}
+	if diagnostics.HasError() {
+		return
+	}
+	var createdID string
+	if command == "add" || len(words) > 2 {
+		var err error
+		_, createdID, err = r.client.run(ctx, words...)
+		if err != nil {
+			diagnostics.AddError("Write RouterOS object", err.Error())
+			return
+		}
+	}
+	if command == "add" {
+		if !objectID.MatchString(createdID) {
+			diagnostics.AddError("Missing RouterOS object ID", "The command succeeded without returning a valid ID. Inspect the router and import the object before retrying.")
+			return
+		}
+		id = createdID
+		// Keep a known binding if the subsequent read fails.
+		diagnostics.Append(state.Set(ctx, plan.Raw)...)
+		for _, field := range r.computed {
+			diagnostics.Append(state.SetAttribute(ctx, attr(field), types.StringNull())...)
+		}
+	}
+	diagnostics.Append(state.SetAttribute(ctx, path.Root("id"), types.StringValue(id))...)
+	if r.ordered && command == "set" && !anchor.IsNull() && !strings.EqualFold(current["place-before"], anchor.ValueString()) {
+		move := []string{r.menu + "/move", "=numbers=" + id}
+		if anchor.ValueString() != "" {
+			move = append(move, "=destination="+strings.ToUpper(anchor.ValueString()))
+		}
+		if _, _, err := r.client.run(ctx, move...); err != nil {
+			diagnostics.AddError("Move RouterOS rule", err.Error())
+			return
+		}
+	}
+	row, err := r.read(ctx, id)
+	if err != nil || row == nil {
+		detail := fmt.Sprintf("Object %s could not be read after the write.", id)
+		if err != nil {
+			detail += " " + err.Error()
+		}
+		if command == "add" {
+			diagnostics.AddWarning("RouterOS object was created but could not be verified", detail+" Its ID was retained. Refresh before applying again.")
+		} else {
+			diagnostics.AddError("Verify RouterOS object", detail)
+		}
+		return
+	}
+	r.store(ctx, state, plan, row, diagnostics)
+}
+
+func (r *managedObject) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	r.write(ctx, req.Plan, &resp.State, "", &resp.Diagnostics)
+}
+func (r *managedObject) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var id types.String
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("id"), &id)...)
+	if !resp.Diagnostics.HasError() {
+		r.write(ctx, req.Plan, &resp.State, id.ValueString(), &resp.Diagnostics)
+	}
+}
+func (r *managedObject) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+	if !r.ready(&resp.Diagnostics) {
+		return
+	}
+	var id types.String
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("id"), &id)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if r.menuLock != nil {
+		r.menuLock.Lock()
+		defer r.menuLock.Unlock()
+	}
+	row, err := r.read(ctx, id.ValueString())
+	if err == nil && row != nil {
+		_, _, err = r.client.run(ctx, r.menu+"/remove", "=.id="+row[".id"])
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Delete RouterOS object", err.Error())
+	}
+}
+func (r *managedObject) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	if !objectID.MatchString(req.ID) {
+		resp.Diagnostics.AddError("Invalid RouterOS object ID", "Use the RouterOS API ID, for example *A.")
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(strings.ToUpper(req.ID)))...)
+}
+
+func (r *managedObject) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	values := make(map[string]string)
+	for _, field := range r.fields() {
+		var value types.String
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, attr(field), &value)...)
+		if value.IsUnknown() {
+			return // Apply validates again after references resolve.
+		}
+		if !value.IsNull() {
+			values[field] = value.ValueString()
+		}
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	r.validateValues(values, &resp.Diagnostics)
+}
+
+func (r *managedObject) validateValues(values map[string]string, diagnostics *diag.Diagnostics) {
+	for _, field := range r.required {
+		if value, known := values[field]; known && value == "" {
+			diagnostics.AddError("Empty required RouterOS setting", fmt.Sprintf("Supply a value for %s.", attr(field)))
+		}
+	}
+	if value, known := values["disabled"]; known && value != "yes" && value != "no" {
+		diagnostics.AddError("Invalid disabled value", "Use yes or no.")
 	}
 	if r.ordered {
 		for _, field := range []string{"src-address", "dst-address"} {
@@ -225,11 +387,6 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 		}
 		if !valid || vpnInterface == "" {
 			diagnostics.AddError("Invalid scoped NAT rule", "Supply a single IPv4 target, a matching NAT action and the VPN interface in the direction of the chain.")
-		} else {
-			rows, _, err := r.client.run(ctx, "/interface/wireguard/print", "=.proplist=name", "?name="+vpnInterface)
-			if err != nil || len(rows) != 1 || rows[0]["name"] != vpnInterface {
-				diagnostics.AddError("WireGuard scope unavailable", "The selected VPN interface must be a readable WireGuard interface on this router.")
-			}
 		}
 	}
 	if r.name == "firewall_rule" {
@@ -243,90 +400,4 @@ func (r *managedObject) write(ctx context.Context, plan tfsdk.Plan, state *tfsdk
 		}
 	}
 
-	var anchor types.String
-	if r.ordered {
-		diagnostics.Append(plan.GetAttribute(ctx, attr("place-before"), &anchor)...)
-		if !anchor.IsNull() && anchor.ValueString() != "" && (!objectID.MatchString(anchor.ValueString()) || anchor.ValueString() == id) {
-			diagnostics.AddError("Invalid rule successor", "The successor must be another rule's RouterOS object ID.")
-		}
-		if command == "add" && anchor.ValueString() != "" {
-			words = append(words, "=place-before="+anchor.ValueString())
-		}
-	}
-	if diagnostics.HasError() {
-		return
-	}
-	_, createdID, err := r.client.run(ctx, words...)
-	if err != nil {
-		diagnostics.AddError("Write RouterOS object", err.Error())
-		return
-	}
-	if command == "add" {
-		if !objectID.MatchString(createdID) {
-			diagnostics.AddError("Missing RouterOS object ID", "The command succeeded without returning a valid ID. Inspect the router and import the object before retrying.")
-			return
-		}
-		id = createdID
-		// Keep a known binding if the subsequent read fails.
-		diagnostics.Append(state.Set(ctx, plan.Raw)...)
-		for _, field := range r.computed {
-			diagnostics.Append(state.SetAttribute(ctx, attr(field), types.StringNull())...)
-		}
-	}
-	diagnostics.Append(state.SetAttribute(ctx, path.Root("id"), types.StringValue(id))...)
-	if r.ordered && command == "set" && current["place-before"] != anchor.ValueString() {
-		move := []string{r.menu + "/move", "=numbers=" + id}
-		if anchor.ValueString() != "" {
-			move = append(move, "=destination="+anchor.ValueString())
-		}
-		if _, _, err := r.client.run(ctx, move...); err != nil {
-			diagnostics.AddError("Move RouterOS rule", err.Error())
-			return
-		}
-	}
-	row, err := r.read(ctx, id)
-	if err != nil {
-		diagnostics.AddError("Verify RouterOS object", err.Error())
-		return
-	}
-	if row == nil {
-		diagnostics.AddError("Verify RouterOS object", fmt.Sprintf("Object %s could not be read after the write.", id))
-		return
-	}
-	r.store(ctx, state, row, diagnostics)
-}
-
-func (r *managedObject) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	r.write(ctx, req.Plan, &resp.State, "", &resp.Diagnostics)
-}
-func (r *managedObject) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var id types.String
-	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("id"), &id)...)
-	if !resp.Diagnostics.HasError() {
-		r.write(ctx, req.Plan, &resp.State, id.ValueString(), &resp.Diagnostics)
-	}
-}
-func (r *managedObject) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	if !r.ready(&resp.Diagnostics) {
-		return
-	}
-	var id types.String
-	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("id"), &id)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	row, err := r.read(ctx, id.ValueString())
-	if err == nil && row != nil {
-		_, _, err = r.client.run(ctx, r.menu+"/remove", "=.id="+id.ValueString())
-	}
-	if err != nil {
-		resp.Diagnostics.AddError("Delete RouterOS object", err.Error())
-	}
-}
-func (r *managedObject) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	if !objectID.MatchString(req.ID) {
-		resp.Diagnostics.AddError("Invalid RouterOS object ID", "Use the RouterOS API ID, for example *A.")
-		return
-	}
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }

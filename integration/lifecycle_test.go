@@ -21,6 +21,11 @@ import (
 // Run the real Terraform lifecycle against an in-process API-SSL test double.
 // The same script also runs against a disposable CHR.
 func TestTerraformLifecycle(t *testing.T) {
+	t.Run("normal", func(t *testing.T) { testTerraformLifecycle(t, false) })
+	t.Run("failed_read_after_create", func(t *testing.T) { testTerraformLifecycle(t, true) })
+}
+
+func testTerraformLifecycle(t *testing.T, failReadAfterCreate bool) {
 	terraform := os.Getenv("TERRAFORM_BIN")
 	if terraform == "" {
 		t.Skip("set TERRAFORM_BIN to enable the wire-level Terraform lifecycle test")
@@ -48,7 +53,7 @@ func TestTerraformLifecycle(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		fixture := &wireguardFixture{}
+		fixture := &wireguardFixture{failReadAfterCreate: failReadAfterCreate}
 		for {
 			conn, err := listener.Accept()
 			if errors.Is(err, net.ErrClosed) {
@@ -86,12 +91,18 @@ func TestTerraformLifecycle(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("Terraform lifecycle: %v\n%s", runErr, output)
 	}
+	if failReadAfterCreate && !strings.Contains(string(output), "RouterOS object was created but could not be verified") {
+		t.Fatal("the simulated failure did not exercise create recovery")
+	}
 	if strings.Contains(string(output), "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") || strings.Contains(string(output), "fixture-password") {
 		t.Fatal("a key or credential appeared in Terraform logs")
 	}
 }
 
-type wireguardFixture struct{ row map[string]string }
+type wireguardFixture struct {
+	row                 map[string]string
+	failReadAfterCreate bool
+}
 
 func sendReply(writer proto.Writer, words ...string) error {
 	writer.BeginSentence()
@@ -138,8 +149,22 @@ func (f *wireguardFixture) serve(conn net.Conn) error {
 			return errors.New("ordinary read used an unexpected WireGuard projection")
 		}
 		if f.row != nil {
+			if f.failReadAfterCreate {
+				f.failReadAfterCreate = false
+				if err := sendReply(writer, "!trap", "=message=temporary test read failure"); err != nil {
+					return err
+				}
+				return sendReply(writer, "!done")
+			}
 			words := []string{"!re", "=.id=*A"}
 			for key, value := range f.row {
+				if key == "disabled" {
+					if value == "yes" {
+						value = "true"
+					} else {
+						value = "false"
+					}
+				}
 				words = append(words, "="+key+"="+value)
 			}
 			if err := sendReply(writer, words...); err != nil {

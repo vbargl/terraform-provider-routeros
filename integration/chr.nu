@@ -46,6 +46,9 @@ try {
         tf plan -out=create.plan
         check-clean (tf show -json create.plan)
         tf apply create.plan
+        # Refresh recovers the public identity if the initial read-back failed.
+        tf apply -refresh-only -auto-approve
+        tf plan -detailed-exitcode
         let id = (tf output -raw interface_id)
         let public_key = (tf output -raw public_key)
         require ($public_key | is-not-empty) 'Expected a public key after creating the interface'

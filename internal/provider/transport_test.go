@@ -4,15 +4,19 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/go-routeros/routeros/v3/proto"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
+	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -67,8 +71,8 @@ func TestTLSAuthenticationAndRedactedTrap(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 	serverDone := make(chan error, 1)
 	go func() {
-		// The untrusted connection fails before the RouterOS login arrives.
-		for attempt := 0; attempt < 2; attempt++ {
+		// Both invalid certificates fail before the RouterOS login arrives.
+		for attempt := 0; attempt < 3; attempt++ {
 			conn, err := listener.Accept()
 			if err != nil {
 				serverDone <- err
@@ -76,7 +80,7 @@ func TestTLSAuthenticationAndRedactedTrap(t *testing.T) {
 			}
 			err = serveTestConnection(conn)
 			_ = conn.Close()
-			if attempt == 1 {
+			if attempt == 2 {
 				serverDone <- err
 			}
 		}
@@ -86,6 +90,39 @@ func TestTLSAuthenticationAndRedactedTrap(t *testing.T) {
 	if _, _, err := client.run(t.Context(), "/interface/wireguard/print"); err == nil || err.Error() != "API-SSL connection or certificate verification failed" {
 		t.Fatalf("expected certificate rejection, got %v", err)
 	}
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateSource.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROUTEROS_USERNAME", "test")
+	t.Setenv("ROUTEROS_PASSWORD", "fixture-password")
+	p := routerProvider{}
+	var schema provider.SchemaResponse
+	p.Schema(t.Context(), provider.SchemaRequest{}, &schema)
+	config := tfsdk.State{Schema: schema.Schema}
+	if diagnostics := config.Set(t.Context(), providerConfig{
+		Address: types.StringValue(net.JoinHostPort("localhost", port)), CACertFile: types.StringValue(caFile),
+	}); diagnostics.HasError() {
+		t.Fatal(diagnostics)
+	}
+	req := provider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: config.Raw}}
+	var resp provider.ConfigureResponse
+	p.Configure(t.Context(), req, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	wrongName, ok := resp.ResourceData.(*routerClient)
+	if !ok || wrongName.tlsConfig.ServerName != "localhost" {
+		t.Fatal("provider did not configure the TLS name from the address")
+	}
+	if _, _, err := wrongName.run(t.Context(), "/interface/wireguard/print"); err == nil || err.Error() != "API-SSL connection or certificate verification failed" {
+		t.Fatalf("expected trusted certificate with wrong name to be rejected, got %v", err)
+	}
+
 	roots := x509.NewCertPool()
 	roots.AddCert(certificateSource.Certificate())
 	client.tlsConfig.RootCAs = roots

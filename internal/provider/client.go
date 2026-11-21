@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	ros "github.com/go-routeros/routeros/v3"
@@ -19,6 +20,7 @@ type routerClient struct {
 	address            string
 	tlsConfig          *tls.Config
 	username, password string
+	orderedLocks       map[string]*sync.Mutex
 }
 
 func (c *routerClient) run(ctx context.Context, words ...string) ([]map[string]string, string, error) {
