@@ -26,3 +26,41 @@ run "separate_generations" {
     error_message = "Managed peers must not expose private keys or preshared keys."
   }
 }
+
+run "container_prerequisites_met" {
+  command = plan
+
+  module {
+    source = "./tests/fixtures/prerequisites"
+  }
+
+  override_data {
+    target = data.routeros_device_mode.current
+    values = { mode = "advanced", container = true, flagged = false }
+  }
+
+  override_data {
+    target = data.routeros_package.container
+    values = { installed = true, disabled = false, version = "7.25.1", scheduled = "" }
+  }
+}
+
+run "container_mode_disabled" {
+  command = plan
+
+  module {
+    source = "./tests/fixtures/prerequisites"
+  }
+
+  override_data {
+    target = data.routeros_device_mode.current
+    values = { mode = "advanced", container = false, flagged = false }
+  }
+
+  override_data {
+    target = data.routeros_package.container
+    values = { installed = true, disabled = true, version = "7.25.1", scheduled = "" }
+  }
+
+  expect_failures = [terraform_data.container_host]
+}

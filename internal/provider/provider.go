@@ -90,7 +90,11 @@ func (*routerProvider) Resources(context.Context) []func() resource.Resource {
 	return result
 }
 func (*routerProvider) DataSources(context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{func() datasource.DataSource { return &dynamicLeases{} }}
+	return []func() datasource.DataSource{
+		func() datasource.DataSource { return &dynamicLeases{} },
+		func() datasource.DataSource { return &deviceMode{} },
+		func() datasource.DataSource { return &systemPackage{} },
+	}
 }
 func (*routerProvider) EphemeralResources(context.Context) []func() ephemeral.EphemeralResource {
 	return []func() ephemeral.EphemeralResource{func() ephemeral.EphemeralResource { return &wireguardKey{} }}
