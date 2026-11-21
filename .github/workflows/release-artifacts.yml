@@ -1,4 +1,4 @@
-name: Prepare release artifacts
+name: Release
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
         description: Version without the v prefix
         required: true
         type: string
+      publish:
+        description: Publish a GitHub Release and tag from main
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -51,3 +55,36 @@ jobs:
             dist/*.zip
             dist/*_manifest.json
             dist/*_SHA256SUMS
+
+  publish:
+    if: inputs.publish && github.ref == 'refs/heads/main'
+    needs: package
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: hustcer/setup-nu@v3
+        with:
+          version: "0.116.1"
+      - uses: actions/download-artifact@v7
+        with:
+          name: terraform-provider-routeros-packages
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: nu --no-config-file {0}
+        run: |
+          let tag = $"v($env.RELEASE_VERSION)"
+          let prefix = $"terraform-provider-routeros_($env.RELEASE_VERSION)"
+          cd dist
+          let checksums = $"($prefix)_SHA256SUMS"
+          ^sha256sum --check --strict $checksums
+          let assets = (glob $"($prefix)_*.zip" | append [$"($prefix)_manifest.json" $checksums])
+
+          # A normal push rejects an existing tag that points to another commit.
+          ^git push origin $"($env.GITHUB_SHA):refs/tags/($tag)"
+          ^gh release create $tag ...$assets --repo $env.GITHUB_REPOSITORY --verify-tag --generate-notes
