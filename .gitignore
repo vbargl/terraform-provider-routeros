@@ -1,0 +1,7 @@
+/terraform-provider-routeros
+/dist/
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.plan
+**/*.tfplan
