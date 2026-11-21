@@ -1,0 +1,20 @@
+# Design for device-owned WireGuard identities
+
+Console needs public identities, peers, addressing, routes, DHCP reservations and observations, and explicitly scoped NAT and filter rules. A rotation can have two interfaces and peers with overlapping allowed routes across those interfaces. Each generation is an independent Terraform object. Console controls handshake verification, route preference, cutover and retirement.
+
+## Provider and transport
+
+The approved direction is a dedicated provider, using RouterOS API-SSL with hostname and CA verification. The existing terraform-routeros provider has broad coverage and could be modified upstream, but v1.99.1 models the interface's private key in state and uses shared CRUD helpers. Generic REST has a smaller integration cost, but Console's prior CHR tests observed secret-bearing mutation and import responses. Keeping interface bootstrap outside Terraform would preserve local identity at the cost of changing the lifecycle and complicating adoption. Reconsider upstream reuse when it offers verified request filtering and secret-free lifecycle and migration behavior.
+
+The provider sends only fixed menu and field allowlists. It uses `add`, `set` and `remove` without requesting a returned object, then reads a projected row. No ordinary WireGuard command requests or writes private or preshared keys. An explicit ephemeral resource has a separate projection and connection configuration. Its result stays in operation memory and is restricted to Terraform ephemeral consumers.
+
+The managed account needs `api,read,write`. The key-reading account needs `api,read,sensitive` and has no write access. These RouterOS policies apply broadly across menus. Account address restrictions and isolated management networking are part of deployment. Keep the key-reading account disabled or its credentials unavailable when unused.
+
+References: [RouterOS API](https://help.mikrotik.com/docs/spaces/ROS/pages/47579160/API), [RouterOS user policies](https://help.mikrotik.com/docs/spaces/ROS/pages/8978504/User), [upstream WireGuard schema](https://github.com/terraform-routeros/terraform-provider-routeros/blob/v1.99.1/routeros/resource_interface_wireguard.go).
+
+## Initial scope and tradeoffs
+
+- Manage IPv4 interfaces and routes, WireGuard, DHCP servers and pools, DHCP network options and static leases. Dynamic leases use a read-only data source.
+- Manage IPv4 WireGuard-scoped source and destination NAT and explicit IPv4 filter rules. New rules default to disabled. Omit `place_before` to leave ordering unmanaged. To enforce relative order, reference a rule that must appear later in the same menu. Several rules can share an anchor. To constrain order among them, chain references to later rules. An imported rule starts with unmanaged ordering. Writes to an ordered menu are serialized per endpoint and menu within a plugin process. Coordinate changes through one state and avoid external writers during an apply.
+- Bifrost owns the ash-twin alias. Its existing default gateway, individual VPN addresses, ACLs and failover remain deployment decisions.
+- RouterOS 7.24.6 is the first qualification target. Passing mocked or wire-level tests does not qualify a RouterOS version. Publish a compatibility claim only after the isolated CHR suite passes, including ordering and normalization checks for any newly advertised resources.
