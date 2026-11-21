@@ -1,0 +1,96 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: nu --no-config-file {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: hustcer/setup-nu@1b8faed9a8ff673c8ce0beae243e0b72d0787241 # v3
+        with:
+          version: "0.116.1"
+      - run: |
+          if $env.RELEASE_VERSION !~ '^[0-9]+\.[0-9]+\.[0-9]+$' {
+            error make {msg: "Expected a version in major.minor.patch format"}
+          }
+          if $env.GITHUB_REF != "refs/heads/main" {
+            error make {msg: "Dispatch publication from main"}
+          }
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+      - run: ^go test ./...
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
+        with:
+          version: v2.20.0
+          args: release --snapshot --clean
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+      - env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          let prefix = $"terraform-provider-routeros_($env.RELEASE_VERSION)"
+          cp terraform-registry-manifest.json $"dist/($prefix)_manifest.json"
+          cd dist
+          ^sha256sum --strict -c $"($prefix)_SHA256SUMS"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: terraform-provider-routeros-packages
+          path: |
+            dist/*.zip
+            dist/*_manifest.json
+            dist/*_SHA256SUMS
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-latest
+    concurrency:
+      group: github-release-${{ inputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: nu --no-config-file {0}
+    steps:
+      - uses: hustcer/setup-nu@1b8faed9a8ff673c8ce0beae243e0b72d0787241 # v3
+        with:
+          version: "0.116.1"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: terraform-provider-routeros-packages
+          path: release
+      - name: Publish release and tag the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          let repo = $env.GITHUB_REPOSITORY
+          let tag = $"v($env.RELEASE_VERSION)"
+          let prefix = $"terraform-provider-routeros_($env.RELEASE_VERSION)"
+          cd release
+          ^sha256sum --strict -c $"($prefix)_SHA256SUMS"
+
+          let releases = (^gh api --paginate $"repos/($repo)/releases" --jq '.[].tag_name' | complete)
+          if $releases.exit_code != 0 { error make {msg: "Could not check for an existing release or draft"} }
+          if $tag in ($releases.stdout | lines) { error make {msg: $"A release or draft for ($tag) already exists"} }
+
+          let files = (glob $"($prefix)_*.zip" | append [$"($prefix)_manifest.json" $"($prefix)_SHA256SUMS"])
+          ^gh api --method POST $"repos/($repo)/git/refs" -f $"ref=refs/tags/($tag)" -f $"sha=($env.GITHUB_SHA)"
+          ^gh release create $tag ...$files --repo $repo --verify-tag --title $tag --generate-notes

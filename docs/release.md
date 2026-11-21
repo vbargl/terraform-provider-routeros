@@ -1,13 +1,35 @@
 # Release preparation
 
-The Registry source address is `vbargl/routeros`. The manifest advertises plugin protocol 6 and the GoReleaser configuration builds versioned binaries, ZIP archives and checksums. Test the configuration locally with `goreleaser release --snapshot --clean --skip=publish`.
-The manually dispatched release-artifacts workflow builds the same ZIPs, manifest and checksums and uploads them as unsigned workflow artifacts.
+The Registry source address is `vbargl/routeros`. GoReleaser builds protocol 6
+binaries, ZIP archives and a checksum file covering the archives and versioned
+Registry manifest. The manual Publish workflow builds these unsigned
+artifacts.
 
-A release operator must first verify repository eligibility and approve the license and release tag. On an approved release, build the release ZIPs and checksum file, including the versioned manifest in the checksums. Sign the checksum file using an existing authorized OpenPGP signing key:
+Dispatch the workflow on `main` with a version such as `0.1.0`. After the
+build succeeds, the workflow creates the matching Git tag and a GitHub
+Release. The publishing job verifies the downloaded assets against their
+SHA-256 sums, creates the tag on the exact build commit and publishes against
+that tag. An existing tag, draft or release stops publication.
 
-```sh
-gpg --batch --local-user "$RELEASE_GPG_FINGERPRINT" --detach-sign \
-  --output "${CHECKSUM_FILE}.sig" "$CHECKSUM_FILE"
+If publishing fails after tag creation, use the artifacts from that workflow
+run. Verify their checksums and confirm the tag points to that run's commit.
+Inspect any existing draft and its assets before completing it. If there
+is no draft, create the release from the verified tag with
+`gh release create --verify-tag` and attach the verified assets.
+
+GitHub assets from this workflow are unsigned.
+
+For an approved release, verify repository eligibility, license and tag.
+Verify all artifact checksums and sign the checksum manifest with an existing
+authorized OpenPGP key in the release operator's environment.
+
+```nu
+let checksum = $env.CHECKSUM_FILE
+^sha256sum -c $checksum
+^gpg --batch --local-user $env.RELEASE_GPG_FINGERPRINT --detach-sign --output $"($checksum).sig" $checksum
+^gpg --verify $"($checksum).sig" $checksum
 ```
 
-Verify the detached signature with the corresponding public key. The Registry consumes the platform ZIPs, versioned manifest, checksum file and checksum signature from the GitHub release. Register the existing public signing key before publishing through the Registry operator account. Keep the private signing key outside the repository and build outputs.
+The Registry consumes the platform ZIPs, versioned manifest, checksum file
+and detached signature from the GitHub release. The release operator registers
+the public key before publishing through the Registry account.
