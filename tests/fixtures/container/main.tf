@@ -26,6 +26,11 @@ resource "routeros_interface_veth" "agent" {
   gateway = "192.168.88.1"
 }
 
+resource "routeros_interface_bridge_port" "agent" {
+  bridge    = "bridge"
+  interface = routeros_interface_veth.agent.name
+}
+
 variable "envs" {
   type = map(string)
   default = {

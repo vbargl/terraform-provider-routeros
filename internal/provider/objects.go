@@ -38,6 +38,7 @@ var objects = []definition{
 	{name: "nat_rule", menu: "/ip/firewall/nat", required: []string{"chain", "action", "src-address", "dst-address", "to-addresses"}, optional: []string{"in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "firewall_rule", menu: "/ip/firewall/filter", required: []string{"chain", "action", "src-address", "dst-address"}, optional: []string{"protocol", "dst-port", "in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "interface_veth", menu: "/interface/veth", required: []string{"name", "address"}, optional: []string{"gateway", "comment", "disabled=no"}},
+	{name: "interface_bridge_port", menu: "/interface/bridge/port", required: []string{"bridge", "interface"}, optional: []string{"comment", "disabled=no"}},
 }
 
 type managedObject struct {
@@ -101,7 +102,7 @@ func (r *managedObject) read(ctx context.Context, id, anchor string) (map[string
 	}
 	fields := append([]string{".id"}, r.fields()...)
 	fields = append(fields, r.computed...)
-	if r.name == "dhcp_lease" || r.name == "ip_address" || r.name == "ip_route" || r.ordered {
+	if r.name == "dhcp_lease" || r.name == "ip_address" || r.name == "ip_route" || r.name == "interface_bridge_port" || r.ordered {
 		fields = append(fields, "dynamic")
 	}
 	words := []string{r.menu + "/print", "=.proplist=" + strings.Join(fields, ",")}

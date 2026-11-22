@@ -87,6 +87,11 @@ run "container_workload" {
   }
 
   assert {
+    condition     = routeros_interface_bridge_port.agent.bridge == "bridge" && routeros_interface_bridge_port.agent.interface == "veth-agent"
+    error_message = "The veth joins the LAN bridge as a port."
+  }
+
+  assert {
     condition     = routeros_container_config.this.password_wo == null
     error_message = "The registry password is write-only and must not appear in the plan or state."
   }
