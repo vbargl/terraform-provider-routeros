@@ -78,7 +78,7 @@ func TestImportRejectsDynamicBridgePorts(t *testing.T) {
 	r := managedObject{
 		definition: testDefinition(t, "interface_bridge_port"),
 		client: runFunc(func(_ context.Context, args ...string) ([]map[string]string, string, error) {
-			if args[0] != "/interface/bridge/port/print" || !strings.Contains(args[1], "bridge,interface,comment,disabled,dynamic") {
+			if args[0] != "/interface/bridge/port/print" || !strings.Contains(args[1], "bridge,interface,edge,comment,disabled,dynamic") {
 				t.Fatalf("unexpected projection %v", args)
 			}
 			return []map[string]string{{".id": "*A", "bridge": "lan", "interface": "wlan1", "dynamic": "true"}}, "", nil

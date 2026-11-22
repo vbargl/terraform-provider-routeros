@@ -38,7 +38,7 @@ var objects = []definition{
 	{name: "nat_rule", menu: "/ip/firewall/nat", required: []string{"chain", "action", "src-address", "dst-address", "to-addresses"}, optional: []string{"in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "firewall_rule", menu: "/ip/firewall/filter", required: []string{"chain", "action", "src-address", "dst-address"}, optional: []string{"protocol", "dst-port", "in-interface", "out-interface", "comment", "disabled=yes"}, ordered: true},
 	{name: "interface_veth", menu: "/interface/veth", required: []string{"name", "address"}, optional: []string{"gateway", "comment", "disabled=no"}},
-	{name: "interface_bridge_port", menu: "/interface/bridge/port", required: []string{"bridge", "interface"}, optional: []string{"comment", "disabled=no"}},
+	{name: "interface_bridge_port", menu: "/interface/bridge/port", required: []string{"bridge", "interface"}, optional: []string{"edge=auto", "comment", "disabled=no"}},
 }
 
 type managedObject struct {
@@ -416,6 +416,10 @@ func (r *managedObject) validateValues(values map[string]string, unknown map[str
 	}
 	if value, known := values["disabled"]; known && value != "" && value != "yes" && value != "no" {
 		diagnostics.AddAttributeError(attr("disabled"), "Invalid disabled value", "Use yes or no.")
+	}
+	if value, known := values["edge"]; known && r.name == "interface_bridge_port" && value != "" &&
+		!containsString([]string{"auto", "no", "no-discover", "yes", "yes-discover"}, value) {
+		diagnostics.AddAttributeError(attr("edge"), "Invalid edge value", "Use auto, no, no-discover, yes or yes-discover.")
 	}
 	switch r.name {
 	case "interface_veth":

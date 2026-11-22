@@ -134,6 +134,8 @@ func TestVethValidation(t *testing.T) {
 		name, field, value string
 		valid              bool
 	}{
+		{"interface_bridge_port", "edge", "yes", true},
+		{"interface_bridge_port", "edge", "always", false},
 		{"interface_veth", "address", "192.168.88.20/24", true},
 		{"interface_veth", "address", "192.168.88.20", false},
 		{"interface_veth", "gateway", "192.168.88.1", true},
