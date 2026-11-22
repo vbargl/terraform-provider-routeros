@@ -26,6 +26,8 @@ type providerConfig struct {
 	Address         types.String `tfsdk:"address"`
 	CACertFile      types.String `tfsdk:"ca_cert_file"`
 	EphemeralAccess types.Bool   `tfsdk:"ephemeral_access"`
+	Username        types.String `tfsdk:"username"`
+	Password        types.String `tfsdk:"password"`
 }
 
 func (p *routerProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -37,6 +39,16 @@ func (*routerProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 		"address":          schema.StringAttribute{Required: true, Description: "API-SSL host and port."},
 		"ca_cert_file":     schema.StringAttribute{Optional: true, Description: "Additional trusted CA PEM file."},
 		"ephemeral_access": schema.BoolAttribute{Optional: true, Description: "Select the dedicated key-reading credentials and disable managed resources for this configuration."},
+		"username": schema.StringAttribute{
+			Optional:    true,
+			Description: "RouterOS account. Defaults to ROUTEROS_USERNAME, or ROUTEROS_EPHEMERAL_USERNAME with ephemeral_access.",
+		},
+		"password": schema.StringAttribute{
+			Optional:  true,
+			Sensitive: true,
+			Description: "Password of the RouterOS account. Defaults to ROUTEROS_PASSWORD, or ROUTEROS_EPHEMERAL_PASSWORD with ephemeral_access. " +
+				"Pass it from an ephemeral variable so it stays out of saved plans.",
+		},
 	}}
 }
 
@@ -46,7 +58,7 @@ func (*routerProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if cfg.Address.IsUnknown() || cfg.CACertFile.IsUnknown() || cfg.EphemeralAccess.IsUnknown() {
+	if cfg.Address.IsUnknown() || cfg.CACertFile.IsUnknown() || cfg.EphemeralAccess.IsUnknown() || cfg.Username.IsUnknown() || cfg.Password.IsUnknown() {
 		resp.Diagnostics.AddError("Unknown RouterOS configuration", "API-SSL settings must be known before the provider is configured.")
 		return
 	}
@@ -70,9 +82,15 @@ func (*routerProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	if cfg.EphemeralAccess.ValueBool() {
 		prefix = "ROUTEROS_EPHEMERAL_"
 	}
-	client := &routerClient{address: address, tlsConfig: tlsConfig, username: os.Getenv(prefix + "USERNAME"), password: os.Getenv(prefix + "PASSWORD")}
+	client := &routerClient{
+		address:   address,
+		tlsConfig: tlsConfig,
+		username:  credential(cfg.Username, prefix+"USERNAME"),
+		password:  credential(cfg.Password, prefix+"PASSWORD"),
+	}
 	if client.username == "" || client.password == "" {
-		resp.Diagnostics.AddError("Missing RouterOS credentials", "Set "+prefix+"USERNAME and "+prefix+"PASSWORD in the provider process environment.")
+		resp.Diagnostics.AddError("Missing RouterOS credentials",
+			"Set username and password in the provider configuration, or "+prefix+"USERNAME and "+prefix+"PASSWORD in the provider process environment.")
 		return
 	}
 	if cfg.EphemeralAccess.ValueBool() {
@@ -80,6 +98,14 @@ func (*routerProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	} else {
 		resp.ResourceData, resp.DataSourceData = client, client
 	}
+}
+
+// credential prefers the provider argument and falls back to the environment variable.
+func credential(value types.String, env string) string {
+	if !value.IsNull() && value.ValueString() != "" {
+		return value.ValueString()
+	}
+	return os.Getenv(env)
 }
 
 func (*routerProvider) Resources(context.Context) []func() resource.Resource {
