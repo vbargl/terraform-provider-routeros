@@ -21,7 +21,24 @@ provider "routeros" {
 }
 ```
 
-Set `ROUTEROS_USERNAME` and `ROUTEROS_PASSWORD` in the provider process environment using an external secret source. Use an API-SSL certificate with a SAN matching the configured address. `ca_cert_file` adds a PEM CA to system trust. Restrict API-SSL and the automation account to the management network. The provider schema has no password arguments.
+Set the credentials with `username` and `password`, or with `ROUTEROS_USERNAME` and `ROUTEROS_PASSWORD` in the provider process environment; an argument takes precedence over its variable. Pass `password` from an ephemeral variable so it stays out of saved plan files (provider configuration never enters state):
+
+```hcl
+variable "router_password" {
+  type      = string
+  sensitive = true
+  ephemeral = true
+}
+
+provider "routeros" {
+  address      = "router.example.net:8729"
+  ca_cert_file = "/etc/ssl/local/router-ca.pem"
+  username     = "automation"
+  password     = var.router_password
+}
+```
+
+With `ephemeral_access = true` the fallback variables are `ROUTEROS_EPHEMERAL_USERNAME` and `ROUTEROS_EPHEMERAL_PASSWORD`. Use an API-SSL certificate with a SAN matching the configured address. `ca_cert_file` adds a PEM CA to system trust. Restrict API-SSL and the automation account to the management network.
 
 ## Adoption and recovery
 
