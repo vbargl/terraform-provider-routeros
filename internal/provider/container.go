@@ -58,7 +58,7 @@ func (*container) Schema(_ context.Context, _ resource.SchemaRequest, resp *reso
 		"remote-image":      "Image reference pulled from the registry in routeros_container_config. Set exactly one of remote_image and file.",
 		"file":              "Image tar file already on the router. Set exactly one of remote_image and file.",
 		"interface":         "veth interface of the container.",
-		"root-dir":          "Directory for the extracted image, for example usb1/containers/name or a tmpfs disk.",
+		"root-dir":          "Directory for the extracted image, for example /usb1/containers/name or a tmpfs disk. A leading slash is optional: RouterOS 7.25 stores the path with one, and both spellings are the same value.",
 		"logging":           "yes or no: forward container output to the RouterOS log.",
 		"restart-policy":    "no, on-failure or always.",
 		"check-certificate": "yes or no: verify the registry TLS certificate.",
@@ -74,7 +74,12 @@ func (*container) Schema(_ context.Context, _ resource.SchemaRequest, resp *reso
 	}
 	for _, field := range containerFields {
 		modifiers := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
-		if !containerInPlace[field] {
+		switch {
+		case field == "root-dir":
+			modifiers = append(modifiers, stringplanmodifier.RequiresReplaceIf(rootDirChanged,
+				"If the path changes other than by a leading slash, Terraform will destroy and recreate the resource.",
+				"If the path changes other than by a leading slash, Terraform will destroy and recreate the resource."))
+		case !containerInPlace[field]:
 			modifiers = append(modifiers, stringplanmodifier.RequiresReplace())
 		}
 		attribute := schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: modifiers, Description: descriptions[field]}
@@ -194,6 +199,23 @@ func normalizeContainer(field, value string) string {
 	return value
 }
 
+// sameContainerValue reports whether a configured and a router value of field
+// mean the same setting. RouterOS 7.25 returns root-dir with a leading slash
+// even when it was added without one.
+func sameContainerValue(field, a, b string) bool {
+	a, b = normalizeContainer(field, a), normalizeContainer(field, b)
+	if field == "root-dir" {
+		a, b = strings.TrimPrefix(a, "/"), strings.TrimPrefix(b, "/")
+	}
+	return a == b
+}
+
+// rootDirChanged replaces the container only for a different path, not for a
+// spelling with or without the leading slash, such as after an import.
+func rootDirChanged(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+	resp.RequiresReplace = !sameContainerValue("root-dir", req.StateValue.ValueString(), req.PlanValue.ValueString())
+}
+
 func (r *container) read(ctx context.Context, id string) (map[string]string, error) {
 	if !objectID.MatchString(id) {
 		return nil, errors.New("expected a RouterOS object ID")
@@ -243,7 +265,7 @@ func (r *container) store(ctx context.Context, state *tfsdk.State, expected obje
 		var prior types.String
 		diagnostics.Append(expected.GetAttribute(ctx, attr(field), &prior)...)
 		value := types.StringValue(normalizeContainer(field, row[field]))
-		if !prior.IsNull() && !prior.IsUnknown() && value.ValueString() == normalizeContainer(field, prior.ValueString()) {
+		if !prior.IsNull() && !prior.IsUnknown() && sameContainerValue(field, value.ValueString(), prior.ValueString()) {
 			value = prior
 		}
 		diagnostics.Append(state.SetAttribute(ctx, attr(field), value)...)
@@ -405,7 +427,7 @@ func (r *container) Update(ctx context.Context, req resource.UpdateRequest, resp
 	for field := range containerInPlace {
 		var value types.String
 		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, attr(field), &value)...)
-		if !value.IsUnknown() && normalizeContainer(field, value.ValueString()) != normalizeContainer(field, current[field]) {
+		if !value.IsUnknown() && !sameContainerValue(field, value.ValueString(), current[field]) {
 			words = append(words, "="+field+"="+value.ValueString())
 		}
 	}
