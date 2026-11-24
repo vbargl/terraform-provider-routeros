@@ -10,7 +10,9 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
@@ -22,6 +24,8 @@ type fakeContainers struct {
 	steps    map[string][]string
 	commands [][]string
 	failPull bool
+	// absoluteRootDir stores root-dir with a leading slash, like RouterOS 7.25.
+	absoluteRootDir bool
 }
 
 func newFakeContainers(t *testing.T) *fakeContainers {
@@ -61,6 +65,9 @@ func (f *fakeContainers) run(_ context.Context, command ...string) ([]map[string
 		row := map[string]string{".id": id, "logging": "false", "check-certificate": "true", "start-on-boot": "false", "restart-policy": "no"}
 		for key, value := range args {
 			row[key] = value
+		}
+		if f.absoluteRootDir && !strings.HasPrefix(row["root-dir"], "/") {
+			row["root-dir"] = "/" + row["root-dir"]
 		}
 		f.rows[id] = row
 		f.setState(id, "downloading/extracting")
@@ -321,5 +328,132 @@ func TestContainerValidation(t *testing.T) {
 	r.ValidateConfig(t.Context(), resource.ValidateConfigRequest{Config: tfsdk.Config(plan)}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatal(resp.Diagnostics)
+	}
+}
+
+// rootDirReplaces runs the root_dir plan modifiers for a change from state to plan.
+func rootDirReplaces(t *testing.T, r *container, state tfsdk.State, plan tfsdk.Plan) bool {
+	t.Helper()
+	var resp resource.SchemaResponse
+	r.Schema(t.Context(), resource.SchemaRequest{}, &resp)
+	req := planmodifier.StringRequest{
+		Path: attr("root-dir"), State: state, Plan: plan,
+		StateValue: types.StringValue(stateValue(t, state, "root_dir")),
+		PlanValue:  types.StringValue(stateValue(t, tfsdk.State(plan), "root_dir")),
+	}
+	result := planmodifier.StringResponse{PlanValue: req.PlanValue}
+	for _, modifier := range resp.Schema.Attributes["root_dir"].(schema.StringAttribute).PlanModifiers {
+		modifier.PlanModifyString(t.Context(), req, &result)
+	}
+	if result.Diagnostics.HasError() {
+		t.Fatal(result.Diagnostics)
+	}
+	return result.RequiresReplace
+}
+
+func withRootDir(dir string) map[string]string {
+	values := map[string]string{}
+	for key, value := range knockerupperPlan {
+		values[key] = value
+	}
+	values["root_dir"] = dir
+	return values
+}
+
+func TestContainerRootDirIgnoresLeadingSlash(t *testing.T) {
+	fake := newFakeContainers(t)
+	fake.absoluteRootDir = true
+	r := &container{client: fake}
+	plan := resourcePlan(t, r, withRootDir("usb1/containers/agent"))
+	created := resource.CreateResponse{State: emptyState(plan)}
+	r.Create(t.Context(), resource.CreateRequest{Plan: plan}, &created)
+	if created.Diagnostics.HasError() {
+		t.Fatal(created.Diagnostics)
+	}
+	if got := fake.rows["*1"]["root-dir"]; got != "/usb1/containers/agent" {
+		t.Fatalf("router root-dir = %s, want the RouterOS 7.25 spelling", got)
+	}
+	if got := stateValue(t, created.State, "root_dir"); got != "usb1/containers/agent" {
+		t.Fatalf("root_dir after create = %s, want the configured spelling", got)
+	}
+	read := resource.ReadResponse{State: created.State}
+	r.Read(t.Context(), resource.ReadRequest{State: created.State}, &read)
+	if got := stateValue(t, read.State, "root_dir"); got != "usb1/containers/agent" {
+		t.Fatalf("root_dir after refresh = %s, want no drift", got)
+	}
+	if rootDirReplaces(t, r, read.State, plan) {
+		t.Fatal("unchanged root_dir requires replacement")
+	}
+
+	// A different path is drift and replaces the container.
+	fake.rows["*1"]["root-dir"] = "/usb1/containers/other"
+	drift := resource.ReadResponse{State: created.State}
+	r.Read(t.Context(), resource.ReadRequest{State: created.State}, &drift)
+	if got := stateValue(t, drift.State, "root_dir"); got != "/usb1/containers/other" {
+		t.Fatalf("root_dir after external change = %s, want drift", got)
+	}
+	if !rootDirReplaces(t, r, drift.State, plan) {
+		t.Fatal("a different router path must replace the container")
+	}
+	fake.rows["*1"]["root-dir"] = "/usb1/containers/agent"
+	if !rootDirReplaces(t, r, created.State, resourcePlan(t, r, withRootDir("usb1/containers/next"))) {
+		t.Fatal("a changed root_dir must replace the container")
+	}
+	if !rootDirReplaces(t, r, created.State, resourcePlan(t, r, withRootDir("/usb1/containers/next"))) {
+		t.Fatal("a changed slash-prefixed root_dir must replace the container")
+	}
+}
+
+func TestContainerRootDirKeepsConfiguredSlash(t *testing.T) {
+	fake := newFakeContainers(t)
+	r := &container{client: fake}
+	plan := resourcePlan(t, r, withRootDir("/usb1/containers/agent"))
+	created := resource.CreateResponse{State: emptyState(plan)}
+	r.Create(t.Context(), resource.CreateRequest{Plan: plan}, &created)
+	if created.Diagnostics.HasError() {
+		t.Fatal(created.Diagnostics)
+	}
+	fake.rows["*1"]["root-dir"] = "usb1/containers/agent"
+	read := resource.ReadResponse{State: created.State}
+	r.Read(t.Context(), resource.ReadRequest{State: created.State}, &read)
+	if got := stateValue(t, read.State, "root_dir"); got != "/usb1/containers/agent" {
+		t.Fatalf("root_dir = %s, want the configured spelling", got)
+	}
+}
+
+func TestContainerImportKeepsRootDirInPlace(t *testing.T) {
+	fake := newFakeContainers(t)
+	fake.absoluteRootDir = true
+	r := &container{client: fake}
+	plan := resourcePlan(t, r, withRootDir("usb1/containers/agent"))
+	created := resource.CreateResponse{State: emptyState(plan)}
+	r.Create(t.Context(), resource.CreateRequest{Plan: plan}, &created)
+	if created.Diagnostics.HasError() {
+		t.Fatal(created.Diagnostics)
+	}
+
+	imported := resource.ImportStateResponse{State: emptyState(plan)}
+	r.ImportState(t.Context(), resource.ImportStateRequest{ID: "*1"}, &imported)
+	read := resource.ReadResponse{State: imported.State}
+	r.Read(t.Context(), resource.ReadRequest{State: imported.State}, &read)
+	if read.Diagnostics.HasError() {
+		t.Fatal(read.Diagnostics)
+	}
+	if got := stateValue(t, read.State, "root_dir"); got != "/usb1/containers/agent" {
+		t.Fatalf("imported root_dir = %s, want the router value", got)
+	}
+	if rootDirReplaces(t, r, read.State, plan) {
+		t.Fatal("the relative spelling of the imported root_dir requires replacement")
+	}
+	updated := resource.UpdateResponse{State: read.State}
+	r.Update(t.Context(), resource.UpdateRequest{Plan: plan, State: read.State}, &updated)
+	if updated.Diagnostics.HasError() {
+		t.Fatal(updated.Diagnostics)
+	}
+	if got := stateValue(t, updated.State, "root_dir"); got != "usb1/containers/agent" {
+		t.Fatalf("root_dir after update = %s, want the configured spelling", got)
+	}
+	if set := fake.sent("/container/set"); len(set) != 0 {
+		t.Fatalf("a root_dir spelling change was written: %v", set)
 	}
 }
